@@ -1,0 +1,29 @@
+# Cloned dependencies (not part of this project)
+openMSX/
+msxGL/
+MSX-UNAPI-specification/
+OpenMSXNET/
+tools/
+
+# Build artifacts
+*.com
+*.dsk
+*.bin
+*.ihx
+*.rel
+*.lst
+*.sym
+*.map
+*.noi
+
+# Disk images
+disk/
+
+# Binaries
+hget.com
+Telnet.com
+run.bat
+
+# OS junk
+Thumbs.db
+.DS_Store
