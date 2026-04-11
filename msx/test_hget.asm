@@ -151,8 +151,8 @@ DNS_GOTIP:
         ld      de,PBLK
         ld      bc,4
         ldir
-        ld      a,80
-        ld      (PBLK+4),a     ; port 80 LE
+        ld      a,23
+        ld      (PBLK+4),a     ; port 23 telnet
         xor     a
         ld      (PBLK+5),a
         ld      a,0FFh
@@ -483,11 +483,9 @@ PBLK:   ds      11
 
 STR_TCPIP: db   "TCP/IP",0
 
-HOSTNAME: db    "example.com",0
+HOSTNAME: db    "sotanomsxbbs.org",0
 
 HTTP_REQ:
-        db      "GET / HTTP/1.0",13,10
-        db      "Host: example.com",13,10
         db      13,10
 HTTP_REQ_END:
 
@@ -507,7 +505,7 @@ S_ERR:  db      " err=$"
 S_BVAL: db      " B=$"
 S_POLL: db      "Polling$"
 S_IP:   db      "IP: $"
-S_OPEN: db      "TCP_OPEN port 80...$"
+S_OPEN: db      "TCP_OPEN port 23...$"
 S_HNDL: db      " handle=$"
 S_WAITEST: db   "Waiting ESTABLISHED...$"
 S_ESTAB: db     "ESTABLISHED!",13,10,"$"
