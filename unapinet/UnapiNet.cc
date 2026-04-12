@@ -788,24 +788,16 @@ void UnapiNet::cmdTcpClose()
         return;
     }
 
-    // Graceful shutdown: enviar FIN
+    // Graceful shutdown: just FIN; let recvLoop detect remote close
+    // and do the actual socket cleanup. Calling sock_close here can
+    // deadlock with the recv thread on Windows.
 #ifdef _WIN32
     shutdown(SOCK(c.sock), SD_SEND);
 #else
     shutdown(SOCK(c.sock), SHUT_WR);
 #endif
-    c.closeReason = 2; // closed via TCPIP_TCP_CLOSE
-
-    // Si no hay datos pendientes en recvBuf, cerrar completamente
-    {
-        std::scoped_lock lock(c.mutex);
-        if (c.recvBuf.empty()) {
-            closeTcpSocket(h);
-        } else {
-            // Dejar en CLOSE_WAIT hasta que el MSX lea los datos
-            c.tcpState = TCP_CLOSE_WAIT;
-        }
-    }
+    c.closeReason = 2;
+    c.tcpState = TCP_CLOSE_WAIT;
 
     setResultByte(0);
 }

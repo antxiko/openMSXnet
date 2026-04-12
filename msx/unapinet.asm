@@ -482,6 +482,9 @@ OLD_EXTBIO:
 UNAPI_ENTRY:
         push    hl
         push    af
+        ; Fast path: fn 29 = TCPIP_WAIT
+        cp      29
+        jr      z,DISPATCH_WAIT
         ld      hl,FN_TABLE
         bit     7,a
         jr      nz,UNDEFINED
@@ -511,7 +514,13 @@ UNDEFINED:
         pop     af
         pop     hl
         ld      a,ERR_NOT_IMP
+        ei
         ret
+
+DISPATCH_WAIT:
+        pop     af
+        pop     hl
+        jp      FN_WAIT
 
 
         ;===================================
@@ -552,11 +561,13 @@ FN_INFO:
         ld      de,256*API_V_P+API_V_S
         ld      hl,APIINFO
         xor     a
+        ei
         ret
 
 ;--- Function undefined
 FN_UNDEF:
         ld      a,ERR_NOT_IMP
+        ei
         ret
 
 
@@ -575,6 +586,7 @@ FN_GET_CAPAB:
         cp      4
         jr      z,.cap4
         ld      a,ERR_INV_PARAM
+        ei
         ret
 
 .cap1:  ; Capabilities: bit2=DNS, bit3=TCP active
@@ -582,6 +594,7 @@ FN_GET_CAPAB:
         ld      de,000Ch        ; features = capabilities
         ld      b,0             ; link level: unknown
         xor     a
+        ei
         ret
 
 .cap2:  ; Connection pool
@@ -592,18 +605,21 @@ FN_GET_CAPAB:
         ld      h,0             ; max raw
         ld      l,0             ; free raw
         xor     a
+        ei
         ret
 
 .cap3:  ; Datagram sizes
         ld      hl,0400h        ; max incoming = 1024
         ld      de,0400h        ; max outgoing = 1024
         xor     a
+        ei
         ret
 
 .cap4:  ; Second capabilities set
         ld      hl,0
         ld      de,0
         xor     a
+        ei
         ret
 
 
@@ -627,6 +643,7 @@ FN_GET_IPINFO:
         ld      hl,0
         ld      de,0
         xor     a
+        ei
         ret
 
 .ip_local:
@@ -644,6 +661,7 @@ FN_GET_IPINFO:
         in      a,(IO_DATA)
         ld      d,a             ; octet 4
         xor     a
+        ei
         ret
 
 .ip_mask:
@@ -652,6 +670,7 @@ FN_GET_IPINFO:
         ld      e,255
         ld      d,0
         xor     a
+        ei
         ret
 
 .ip_gw:
@@ -670,6 +689,7 @@ FN_GET_IPINFO:
         in      a,(IO_DATA)    ; discard octet 4
         ld      d,1
         xor     a
+        ei
         ret
 
 .ip_dns1:
@@ -678,6 +698,7 @@ FN_GET_IPINFO:
         ld      e,8
         ld      d,8
         xor     a
+        ei
         ret
 
 .ip_dns2:
@@ -686,12 +707,14 @@ FN_GET_IPINFO:
         ld      e,4
         ld      d,4
         xor     a
+        ei
         ret
 
 .ip_zero:
         ld      hl,0
         ld      de,0
         xor     a
+        ei
         ret
 
 
@@ -707,10 +730,12 @@ FN_NET_STATE:
         in      a,(IO_DATA)
         ld      b,a
         xor     a
+        ei
         ret
 .ns_open:
         ld      b,2             ; assume open
         xor     a
+        ei
         ret
 
 
@@ -747,6 +772,7 @@ FN_DNS_Q:
         jr      z,.dq_ip
         ; status 0 = in progress
         xor     a
+        ei
         ret
 
 .dq_ip: ; Read 4 bytes IP
@@ -759,10 +785,12 @@ FN_DNS_Q:
         in      a,(IO_DATA)
         ld      d,a
         xor     a               ; ERR_OK
+        ei
         ret
 
 .dq_err:
         ld      a,ERR_QUERY_EXISTS
+        ei
         ret
 
 
@@ -789,12 +817,14 @@ FN_DNS_S:
 .ds_idle:
         ld      b,0
         xor     a
+        ei
         ret
 
 .ds_progress:
         ld      b,1
         ld      c,1             ; querying primary DNS
         xor     a
+        ei
         ret
 
 .ds_complete:
@@ -809,12 +839,14 @@ FN_DNS_S:
         in      a,(IO_DATA)
         ld      d,a
         xor     a
+        ei
         ret
 
 .ds_error:
         in      a,(IO_DATA)     ; DNS error code
         ld      b,a
         ld      a,8             ; ERR_DNS
+        ei
         ret
 
 
@@ -842,10 +874,12 @@ FN_TCP_OPEN:
         jr      z,.to_err
         ld      b,a
         xor     a               ; ERR_OK
+        ei
         ret
 
 .to_err:
         ld      a,ERR_NO_FREE_CONN
+        ei
         ret
 
 
@@ -864,9 +898,11 @@ FN_TCP_CLOSE:
         jr      nz,.tc_err
         in      a,(IO_DATA)     ; consume status byte
         xor     a
+        ei
         ret
 .tc_err:
         ld      a,ERR_NO_CONN
+        ei
         ret
 
 
@@ -885,9 +921,11 @@ FN_TCP_ABORT:
         jr      nz,.ta_err
         in      a,(IO_DATA)     ; consume status byte
         xor     a
+        ei
         ret
 .ta_err:
         ld      a,ERR_NO_CONN
+        ei
         ret
 
 
@@ -915,6 +953,7 @@ FN_TCP_STATE:
         ld      c,a
         ld      de,0            ; no urgent data
         xor     a
+        ei
         ret
 
 .ts_err:
@@ -923,6 +962,7 @@ FN_TCP_STATE:
         ld      hl,0
         ld      de,0
         ld      a,ERR_NO_CONN
+        ei
         ret
 
 
@@ -964,9 +1004,11 @@ FN_TCP_SEND:
         or      a
         ret     z               ; A=0 = ERR_OK
         ld      a,ERR_CONN_STATE
+        ei
         ret
 .ts_serr:
         ld      a,ERR_CONN_STATE
+        ei
         ret
 
 
@@ -1017,6 +1059,7 @@ FN_TCP_RCV:
         pop     bc              ; BC = actual length
         ld      hl,0            ; no urgent data
         xor     a               ; ERR_OK
+        ei
         ret
 
 .tr_nodata:
@@ -1024,6 +1067,21 @@ FN_TCP_RCV:
         ld      bc,0
         ld      hl,0
         ld      a,ERR_NO_DATA
+        ei
+        ret
+
+
+;--- Function 29: TCPIP_WAIT (MANDATORY per UNAPI spec 1.1)
+;    Block until next 50/60Hz timer tick, then return ERR_OK.
+;    Polls *FC9Eh (JIFFY counter, page 3 always mapped).
+;    This gives interrupts time to fire, preventing deadlock
+;    in hget's LetTcpipBreathe() polling loop.
+
+FN_WAIT:
+        ; Per UNAPI spec: block until next timer interrupt fires.
+        ei
+        halt
+        xor     a
         ret
 
 

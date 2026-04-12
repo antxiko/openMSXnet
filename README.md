@@ -31,17 +31,21 @@ data transfer using real sockets.
 
 ### Working
 
-- UNAPI discovery (programs find the `TCP/IP` implementation via EXTBIO)
+- UNAPI discovery via EXTBIO (programs find the `TCP/IP` implementation)
 - DNS resolution (async via host `getaddrinfo`, polling with DNS_Q/DNS_S)
 - TCP connections (up to 4 simultaneous, non-blocking connect)
 - TCP send/receive with 64KB receive buffer per connection
-- Telnet to BBS servers (tested with sotanomsxbbs.org)
+- TCPIP_WAIT (fn 29) via `ei`/`halt` — mandatory per spec, blocks clients that poll `*SYSTIMER`
+- **Telnet** to BBS servers (tested with sotanomsxbbs.org)
+- **hget** HTTP/1.1 downloads (tested with example.com, chunked transfer OK)
 
-### Not working yet
+### Not implemented
 
-- UDP, ICMP ping, Raw IP
-- hget hangs at "Connecting to server..." (TCP_OPEN via UNAPI returns
-  handle 0 in some cases, under investigation)
+- UDP (fn 8-12)
+- ICMP ping (fn 4-5)
+- TCP_DISCARD (fn 19)
+- Raw IP (fn 20-24)
+- CONFIG (fn 25-28)
 
 ## Files
 
@@ -252,13 +256,23 @@ when the MSX side doesn't consume all result bytes.
 
 ## Known issues
 
-- **hget hangs at "Connecting to server..."**: TCP_OPEN returns handle 0
-  when called through the UNAPI mapper segment in some cases. Direct I/O
-  test works fine. Under investigation.
 - **DLL dependencies**: the Windows build links dynamically (required for
   Tcl). All DLLs from `/mingw64/bin/` must be copied to the binary dir.
 - **openMSX RELEASE_21_0 build**: requires 4 patches for MSYS2
   compatibility (see Build section above).
+
+## Notes on tricky bugs that were fixed
+
+- **TCPIP_WAIT (fn 29) is mandatory**: some clients (like hget) have a busy-wait
+  loop `while(*SYSTIMER == saved);` right after calling `UnapiCall(TCPIP_WAIT)`.
+  If WAIT returns immediately without letting the timer tick advance, that loop
+  is infinite. The implementation uses `ei`/`halt` to block until the next
+  timer interrupt fires.
+- **Deadlock in `cmdTcpClose`**: early versions acquired the per-connection
+  `std::mutex` and then called `closeTcpSocket()` which tried to acquire it
+  again. `std::mutex` is not recursive -- that hung the whole emulator.
+  Fixed by just doing `shutdown(SD_SEND)` in the close handler and letting
+  the background `recvLoop` thread detect the remote close via `recv()==0`.
 
 ## References
 
