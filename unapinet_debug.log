@@ -1,0 +1,12 @@
+CMD 00 (0 bytes)
+CMD 0A (1 bytes)
+CMD 01 (14 bytes)
+CMD 02 (0 bytes)
+CMD 0A (1 bytes)
+CMD 09 (2 bytes)
+  UDP_OPEN: paramBuf.size=2 FF FF
+  UDP_OPEN: localPort=65535 allocHandle=1
+CMD 0C (26 bytes)
+CMD 0F (3 bytes)
+CMD 0C (13 bytes)
+CMD 0A (1 bytes)

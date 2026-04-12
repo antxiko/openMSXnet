@@ -37,10 +37,10 @@
 // ============================================================
 
 // --- Capabilities para QUERY_CAP (Phase 2) ---
-// Byte 0: bit0=TCP bit1=UDP bit2=DNS  → 0x05 = TCP+DNS
-// Byte 1: versión bridge = 0x02 (Phase 2)
-static constexpr uint8_t CAP_BYTE0 = 0x05; // TCP + DNS (UDP en Phase 3)
-static constexpr uint8_t CAP_BYTE1 = 0x02; // bridge version 2
+// Byte 0: bit0=TCP bit1=UDP bit2=DNS  → 0x07 = TCP+UDP+DNS
+// Byte 1: versión bridge = 0x03 (Phase 3 - UDP added)
+static constexpr uint8_t CAP_BYTE0 = 0x07; // TCP + UDP + DNS
+static constexpr uint8_t CAP_BYTE1 = 0x03; // bridge version 3
 
 // Tamaño máximo de transferencia por comando TCP_SEND/TCP_RECV
 static constexpr size_t MAX_TRANSFER = 4096;
@@ -231,7 +231,10 @@ void UnapiNet::closeAllConnections()
 {
     for (int i = 1; i <= MAX_TCP; i++) {
         closeTcpSocket(i);
-        tcp[i - 1].closeReason = 1; // reset a "never used"
+        tcp[i - 1].closeReason = 1;
+    }
+    for (int i = 1; i <= MAX_UDP; i++) {
+        closeUdpSocket(i);
     }
 }
 
@@ -369,6 +372,38 @@ void UnapiNet::receiverLoop()
                 c.sock = INVALID_SOCK;
             }
         }
+
+        // --- Poll UDP sockets for incoming datagrams ---
+        for (int i = 0; i < MAX_UDP; i++) {
+            auto& u = udp[i];
+            if (u.sock == INVALID_SOCK) continue;
+
+            SOCKET sd = static_cast<SOCKET>(u.sock);
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(sd, &rfds);
+            struct timeval tv = {0, 0};
+
+            if (select(static_cast<int>(sd) + 1,
+                       &rfds, nullptr, nullptr, &tv) <= 0) continue;
+
+            char buf[2048];
+            struct sockaddr_in src;
+            socklen_t slen = sizeof(src);
+            int n = recvfrom(sd, buf, sizeof(buf), 0,
+                             reinterpret_cast<struct sockaddr*>(&src), &slen);
+            if (n <= 0) continue;
+
+            UdpDatagram dg;
+            dg.srcIP = ntohl(src.sin_addr.s_addr);
+            dg.srcPort = ntohs(src.sin_port);
+            dg.data.assign(buf, buf + n);
+
+            std::scoped_lock lock(u.mutex);
+            if (u.recvQueue.size() < 16) { // cap at 16 pending dgrams
+                u.recvQueue.push_back(std::move(dg));
+            }
+        }
     }
 }
 
@@ -391,6 +426,11 @@ void UnapiNet::processCmd(uint8_t cmd)
     case CMD_TCP_ABORT:  cmdTcpAbort();  break;
     case CMD_GET_LOCALIP: cmdGetLocalIP(); break;
     case CMD_NET_STATE:  cmdNetState();  break;
+    case CMD_UDP_OPEN:   cmdUdpOpen();   break;
+    case CMD_UDP_CLOSE:  cmdUdpClose();  break;
+    case CMD_UDP_STATE:  cmdUdpState();  break;
+    case CMD_UDP_SEND:   cmdUdpSend();   break;
+    case CMD_UDP_RECV:   cmdUdpRecv();   break;
     default:
         setError();
         break;
@@ -891,6 +931,267 @@ void UnapiNet::cmdGetLocalIP()
 void UnapiNet::cmdNetState()
 {
     setResultByte(2); // open
+}
+
+// ============================================================
+//  UDP: handle management
+// ============================================================
+
+int UnapiNet::allocUdpHandle()
+{
+    for (int i = 0; i < MAX_UDP; i++) {
+        if (udp[i].sock == INVALID_SOCK) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+void UnapiNet::closeUdpSocket(int h)
+{
+    if (h < 1 || h > MAX_UDP) return;
+    auto& u = udp[h - 1];
+    if (u.sock != INVALID_SOCK) {
+        sock_close(static_cast<SOCKET>(u.sock));
+        u.sock = INVALID_SOCK;
+    }
+    u.localPort = 0;
+    u.resident = false;
+    {
+        std::scoped_lock lock(u.mutex);
+        u.recvQueue.clear();
+    }
+}
+
+// ============================================================
+//  UDP_OPEN (0x09)
+//  Params: local_port[2 LE] (0xFFFF = random)
+//  Result: 1 byte handle (0 = error)
+// ============================================================
+
+void UnapiNet::cmdUdpOpen()
+{
+    if (paramBuf.size() < 2) {
+        setResultByte(0);
+        return;
+    }
+    uint16_t localPort = static_cast<uint16_t>(paramBuf[0]) |
+                         (static_cast<uint16_t>(paramBuf[1]) << 8);
+
+    int h = allocUdpHandle();
+    if (h == 0) {
+        setResultByte(0);
+        return;
+    }
+    auto& u = udp[h - 1];
+
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == OPENMSX_INVALID_SOCKET) {
+        setResultByte(0);
+        return;
+    }
+
+    setNonBlocking(ISOCK(s));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(localPort == 0xFFFF ? 0 : localPort);
+
+    if (bind(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        // Fallback: if bind to a privileged port (<1024) fails on Windows
+        // without admin, fall back to a random port. MSX UDP clients
+        // typically don't depend on a specific local port.
+        addr.sin_port = 0;
+        if (bind(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+            sock_close(s);
+            setResultByte(0);
+            return;
+        }
+    }
+
+    // Read back actual local port
+    socklen_t alen = sizeof(addr);
+    if (getsockname(s, reinterpret_cast<struct sockaddr*>(&addr), &alen) == 0) {
+        u.localPort = ntohs(addr.sin_port);
+    } else {
+        u.localPort = localPort;
+    }
+
+    u.sock = ISOCK(s);
+    u.resident = false;
+    {
+        std::scoped_lock lock(u.mutex);
+        u.recvQueue.clear();
+    }
+
+    setResultByte(static_cast<uint8_t>(h));
+}
+
+// ============================================================
+//  UDP_CLOSE (0x0A)
+//  Params: handle[1] (0 = close all transient)
+//  Result: 1 byte status
+// ============================================================
+
+void UnapiNet::cmdUdpClose()
+{
+    if (paramBuf.empty()) {
+        setResultByte(1);
+        return;
+    }
+    int h = paramBuf[0];
+
+    if (h == 0) {
+        for (int i = 0; i < MAX_UDP; i++) {
+            if (!udp[i].resident && udp[i].sock != INVALID_SOCK) {
+                closeUdpSocket(i + 1);
+            }
+        }
+        setResultByte(0);
+        return;
+    }
+
+    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == INVALID_SOCK) {
+        setResultByte(1);
+        return;
+    }
+    closeUdpSocket(h);
+    setResultByte(0);
+}
+
+// ============================================================
+//  UDP_STATE (0x0B)
+//  Params: handle[1]
+//  Result: 2 bytes: first datagram size (LE), 0 if none
+// ============================================================
+
+void UnapiNet::cmdUdpState()
+{
+    uint16_t size = 0;
+    if (!paramBuf.empty()) {
+        int h = paramBuf[0];
+        if (h >= 1 && h <= MAX_UDP && udp[h - 1].sock != INVALID_SOCK) {
+            auto& u = udp[h - 1];
+            std::scoped_lock lock(u.mutex);
+            if (!u.recvQueue.empty()) {
+                size = static_cast<uint16_t>(
+                    std::min(u.recvQueue.front().data.size(),
+                             static_cast<size_t>(0xFFFF)));
+            }
+        }
+    }
+    uint8_t res[2] = {
+        static_cast<uint8_t>(size & 0xFF),
+        static_cast<uint8_t>((size >> 8) & 0xFF)
+    };
+    setResult(res, 2);
+}
+
+// ============================================================
+//  UDP_SEND (0x0C)
+//  Params: handle[1] + dest_IP[4] + dest_port[2 LE] + len[2 LE] + data
+//  Result: 1 byte status
+// ============================================================
+
+void UnapiNet::cmdUdpSend()
+{
+    if (paramBuf.size() < 9) {
+        setResultByte(1);
+        return;
+    }
+    int h = paramBuf[0];
+    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == INVALID_SOCK) {
+        setResultByte(1);
+        return;
+    }
+    auto& u = udp[h - 1];
+
+    uint32_t ip = (static_cast<uint32_t>(paramBuf[1]) << 24) |
+                  (static_cast<uint32_t>(paramBuf[2]) << 16) |
+                  (static_cast<uint32_t>(paramBuf[3]) <<  8) |
+                  (static_cast<uint32_t>(paramBuf[4]) <<  0);
+    uint16_t port = static_cast<uint16_t>(paramBuf[5]) |
+                    (static_cast<uint16_t>(paramBuf[6]) << 8);
+    uint16_t len = static_cast<uint16_t>(paramBuf[7]) |
+                   (static_cast<uint16_t>(paramBuf[8]) << 8);
+
+    if (paramBuf.size() < static_cast<size_t>(9 + len)) {
+        setResultByte(1);
+        return;
+    }
+
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = htonl(ip);
+    dest.sin_port = htons(port);
+
+    const char* data = reinterpret_cast<const char*>(paramBuf.data() + 9);
+    int n = sendto(static_cast<SOCKET>(u.sock), data, len, 0,
+                   reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
+    setResultByte(n == len ? 0 : 1);
+}
+
+// ============================================================
+//  UDP_RECV (0x0F)
+//  Params: handle[1] + maxlen[2 LE]
+//  Result: src_IP[4] + src_port[2 LE] + actual_len[2 LE] + data
+// ============================================================
+
+void UnapiNet::cmdUdpRecv()
+{
+    if (paramBuf.size() < 3) {
+        uint8_t res[8] = {0};
+        setResult(res, 8);
+        return;
+    }
+    int h = paramBuf[0];
+    uint16_t maxlen = static_cast<uint16_t>(paramBuf[1]) |
+                      (static_cast<uint16_t>(paramBuf[2]) << 8);
+
+    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == INVALID_SOCK) {
+        uint8_t res[8] = {0};
+        setResult(res, 8);
+        return;
+    }
+    auto& u = udp[h - 1];
+
+    UdpDatagram dg;
+    bool haveDg = false;
+    {
+        std::scoped_lock lock(u.mutex);
+        if (!u.recvQueue.empty()) {
+            dg = std::move(u.recvQueue.front());
+            u.recvQueue.pop_front();
+            haveDg = true;
+        }
+    }
+
+    if (!haveDg) {
+        uint8_t res[8] = {0};
+        setResult(res, 8);
+        return;
+    }
+
+    uint16_t actual = static_cast<uint16_t>(
+        std::min(static_cast<size_t>(maxlen), dg.data.size()));
+
+    std::vector<uint8_t> result;
+    result.reserve(8 + actual);
+    result.push_back(static_cast<uint8_t>((dg.srcIP >> 24) & 0xFF));
+    result.push_back(static_cast<uint8_t>((dg.srcIP >> 16) & 0xFF));
+    result.push_back(static_cast<uint8_t>((dg.srcIP >>  8) & 0xFF));
+    result.push_back(static_cast<uint8_t>((dg.srcIP >>  0) & 0xFF));
+    result.push_back(static_cast<uint8_t>(dg.srcPort & 0xFF));
+    result.push_back(static_cast<uint8_t>((dg.srcPort >> 8) & 0xFF));
+    result.push_back(static_cast<uint8_t>(actual & 0xFF));
+    result.push_back(static_cast<uint8_t>((actual >> 8) & 0xFF));
+    for (uint16_t i = 0; i < actual; i++) {
+        result.push_back(dg.data[i]);
+    }
+    setResultVec(result);
 }
 
 // ============================================================

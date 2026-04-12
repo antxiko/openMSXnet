@@ -1,92 +1,113 @@
 # openMSXnet
 
-Real TCP/IP networking for MSX software running in openMSX.
+An MSX TCP/IP UNAPI implementation that exposes the host operating system's
+network stack to MSX software running under the [openMSX](https://openmsx.org/)
+emulator.
 
-A C++ extension for the openMSX emulator that bridges the MSX UNAPI TCP/IP
-specification to the host operating system's BSD socket API. MSX programs
-that use UNAPI (hget, telnet, IRC clients, etc.) get transparent internet
-access through the host's network stack.
+The implementation consists of two cooperating components:
 
-## How it works
+- A C++ device extension compiled into openMSX, which holds real BSD sockets
+  and a background polling thread on the host side.
+- A Z80 TSR (`UNAPINET.COM`) that installs in a memory mapper segment under
+  Nextor / MSX-DOS 2, hooks `EXTBIO`, and exposes a standards-compliant
+  TCP/IP UNAPI 1.1 interface to client programs. Function calls are
+  marshalled through a pair of I/O ports to the C++ device.
+
+Programs that target the UNAPI TCP/IP specification (such as `hget`, `telnet`,
+`sntp`) run unmodified.
+
+## Architecture
 
 ```
-MSX program (hget, telnet, ...)
-        |
-    UNAPI TCP/IP calls
-        |
-UNAPINET.COM (Z80 TSR in mapper segment)
-        |  I/O ports 7Eh / 7Fh
-UnapiNet extension (C++ inside openMSX)
-        |  BSD sockets + threads
-    Host network
+MSX program (hget, telnet, sntp, ...)
+        │
+        │  UNAPI TCP/IP function calls
+        ▼
+UNAPINET.COM    (Z80 TSR in mapper segment)
+        │
+        │  I/O ports 7Eh / 7Fh
+        ▼
+UnapiNet device (C++, inside openMSX)
+        │
+        │  BSD sockets, threads
+        ▼
+   Host OS network stack
 ```
 
-The TSR installs in a memory mapper segment via the UNAPI RAM helper
-(included in Nextor 2.1+). It hooks EXTBIO and registers as a `TCP/IP`
-UNAPI implementation. Function calls are dispatched through two I/O ports
-to the C++ extension, which handles DNS resolution, TCP connections, and
-data transfer using real sockets.
+## Implementation status
 
-## Status
+### Implemented and tested
 
-### Working
+| Feature | Notes |
+|---------|-------|
+| UNAPI discovery via `EXTBIO` (DE=2222h, ARG=`"TCP/IP"`) | Programs locate the implementation through Nextor's RAM helper |
+| DNS resolution | Asynchronous, backed by host `getaddrinfo()` |
+| TCP active connections | Up to 4 simultaneous, non-blocking `connect()` |
+| TCP send / receive | 64 KiB receive buffer per connection |
+| UDP datagrams | Up to 4 simultaneous, automatic fallback when bind to a privileged port (<1024) is denied |
+| `TCPIP_WAIT` (fn 29) | `EI`/`HALT` idiom to release a 50/60 Hz tick |
+| `TCPIP_GET_IPINFO` | Local IP discovered via UDP socket trick to 8.8.8.8 |
 
-- UNAPI discovery via EXTBIO (programs find the `TCP/IP` implementation)
-- DNS resolution (async via host `getaddrinfo`, polling with DNS_Q/DNS_S)
-- TCP connections (up to 4 simultaneous, non-blocking connect)
-- TCP send/receive with 64KB receive buffer per connection
-- TCPIP_WAIT (fn 29) via `ei`/`halt` — mandatory per spec, blocks clients that poll `*SYSTIMER`
-- **Telnet** to BBS servers (tested with sotanomsxbbs.org)
-- **hget** HTTP/1.1 downloads (tested with example.com, chunked transfer OK)
+Verified against:
+- **`telnet`** (BBS sessions, including ANSI screens with sotanomsxbbs.org)
+- **`hget`** (HTTP/1.1 chunked transfer, tested with example.com)
+- **`sntp`** (clock synchronisation with `pool.ntp.org`)
+- **`tftp`** (file download from a local TFTP server)
 
 ### Not implemented
 
-- UDP (fn 8-12)
-- ICMP ping (fn 4-5)
-- TCP_DISCARD (fn 19)
-- Raw IP (fn 20-24)
-- CONFIG (fn 25-28)
+| UNAPI function | Reason |
+|----------------|--------|
+| `TCPIP_SEND_ECHO` / `TCPIP_RCV_ECHO` (fn 4-5) | ICMP echo. Not advertised in capabilities. |
+| `TCPIP_TCP_DISCARD` (fn 19) | No client encountered relies on it. |
+| Raw IP (fn 20-24) | Not advertised. |
+| `TCPIP_CONFIG_*` (fn 25-28) | Network configuration is delegated to the host OS. |
 
-## Files
+### Known limitations
+
+- Capabilities advertise TCP active mode and UDP only. TCP passive mode
+  (listen / accept) is not implemented.
+- Save states do not preserve socket state; open connections are lost on
+  load.
+
+## Repository layout
 
 ```
 unapinet/
-  UnapiNet.hh          C++ extension header
-  UnapiNet.cc           C++ extension implementation
-  unapinet.xml          openMSX extension descriptor (ports 7Eh-7Fh)
+  UnapiNet.hh           C++ device class declaration
+  UnapiNet.cc           C++ device implementation
+  unapinet.xml          openMSX device descriptor (claims I/O ports 7Eh-7Fh)
 
 msx/
-  unapinet.asm          Z80 TSR, pure ASM (Nestor80 syntax)
-  unapinet.c            Legacy C version (archived, replaced by .asm)
-  test_unapi.asm         Direct I/O test (ports 7E/7F, no UNAPI)
-  test_hget.asm          UNAPI-level test (simulates hget flow)
+  unapinet.asm          Z80 TSR (Nestor80 syntax)
+  test_unapi.asm        Direct I/O regression test (does not exercise the dispatcher)
+  test_hget.asm         End-to-end test mirroring hget's call sequence
 ```
 
-## Build
+## Building
 
-### Requirements
+### Prerequisites
 
-- [openMSX](https://github.com/openMSX/openMSX) source (tested with
-  RELEASE_21_0)
-- [MSYS2](https://www.msys2.org/) MINGW64 environment (for Windows)
+- [openMSX](https://github.com/openMSX/openMSX) source tree, tested with
+  `RELEASE_21_0`
 - [Nestor80](https://github.com/Konamiman/Nestor80) Z80 assembler
-- [Nextor 2.1.3](https://github.com/Konamiman/Nextor) SunriseIDE ROM
-
-### MSYS2 packages
+- A Nextor 2.1.x ROM (the MSX RAM helper used by the TSR is part of Nextor)
+- On Windows: [MSYS2](https://www.msys2.org/) MINGW64 environment with the
+  packages listed below
 
 ```bash
 pacman -S --needed mingw-w64-x86_64-{gcc,SDL2,SDL2_ttf,freetype,glew,libpng,tcl,zlib,libogg,libvorbis,libtheora,mtools}
 ```
 
-### Building the openMSX extension
+### openMSX device extension
 
-1. Clone openMSX and checkout RELEASE_21_0:
+1. Clone openMSX and check out the supported release:
    ```bash
    git clone https://github.com/openMSX/openMSX.git
    cd openMSX && git checkout RELEASE_21_0
    ```
 
-2. Copy our source files:
+2. Stage the device sources:
    ```bash
    mkdir -p src/unapinet
    cp /path/to/openMSXnet/unapinet/UnapiNet.{hh,cc} src/unapinet/
@@ -96,51 +117,50 @@ pacman -S --needed mingw-w64-x86_64-{gcc,SDL2,SDL2_ttf,freetype,glew,libpng,tcl,
 3. Register the device in `src/DeviceFactory.cc`:
    ```cpp
    #include "UnapiNet.hh"
-   // In the create() function, add:
+   // ...
    } else if (type == "UnapiNet") {
        result = std::make_unique<UnapiNet>(conf);
    }
    ```
 
-4. Apply Windows build patches (RELEASE_21_0 has issues with MSYS2):
+4. Apply the following patches to make `RELEASE_21_0` build cleanly under
+   MSYS2 MINGW64:
 
-   **`build/msysutils.py`** -- Python 3 compatibility:
+   `build/msysutils.py` — Python 3 compatibility:
    ```python
-   # Line 14: fix print syntax
    '"%s" -c \'import sys ; print(sys.argv[1])\' /'
-   # Line 27: fix bytes/str
    msysRoot = stdoutdata.strip().decode('utf-8') if isinstance(stdoutdata, bytes) else stdoutdata.strip()
    ```
 
-   **`build/platform-mingw-w64.mk`** -- allow dynamic linking:
+   `build/platform-mingw-w64.mk` — replace the global `-static` with a
+   selective static link of the GCC runtime, otherwise Tcl cannot be
+   linked dynamically:
    ```makefile
-   # Line 25: change -static to:
    LINK_FLAGS:= -static-libgcc -static-libstdc++ $(LINK_FLAGS)
    ```
 
-   **`build/platform-mingw32.mk`** -- add Winsock 2:
+   `build/platform-mingw32.mk` — add Winsock 2 (the default `-lwsock32` is
+   Winsock 1 and lacks `getaddrinfo`, `inet_pton`, `freeaddrinfo`):
    ```makefile
-   # Line 19: add -lws2_32
    -L/mingw/lib -L/mingw/lib/w32api -lws2_32 -lwsock32 -lwinmm ...
    ```
 
-   **`build/main.mk`** -- remove -ldl on non-Linux:
+   `build/main.mk` — `-ldl` is Linux-specific:
    ```makefile
-   # Lines 94-98: change to only add -ldl on Linux
    LINK_FLAGS:=-pthread
    ifneq ($(filter linux%,$(OPENMSX_TARGET_OS)),)
    LINK_FLAGS+=-ldl
    endif
    ```
 
-5. Compile from MSYS2 MINGW64 shell:
+5. Build from the MSYS2 MINGW64 shell:
    ```bash
    export PYTHON=/mingw64/bin/python3 MSYSCON=yes SHELL=/usr/bin/bash TCL_CONFIG=/mingw64/lib
    make -j8
    ```
 
-6. Copy runtime DLLs to the binary directory
-   (`derived/x86_64-mingw-w64-opt/bin/`):
+6. Copy the runtime DLLs alongside the resulting `openmsx.exe` (in
+   `derived/x86_64-mingw-w64-opt/bin/`):
    ```
    SDL2.dll SDL2_ttf.dll libfreetype-6.dll glew32.dll libogg-0.dll
    libpng16-16.dll libtheoradec-2.dll libvorbis-0.dll tcl86.dll
@@ -149,15 +169,16 @@ pacman -S --needed mingw-w64-x86_64-{gcc,SDL2,SDL2_ttf,freetype,glew,libpng,tcl,
    libglib-2.0-0.dll libintl-8.dll libiconv-2.dll libpcre2-8-0.dll
    libgraphite2.dll
    ```
-   All found in `/mingw64/bin/`.
 
-### Building the MSX TSR
+### MSX TSR
 
 ```bash
 N80 msx/unapinet.asm msx/unapinet.com --direct-output-write
 ```
 
-Output: `unapinet.com` (~1.5KB).
+The output binary is roughly 2 KiB. Copy it to a Nextor disk image
+alongside `NEXTOR.SYS` and `COMMAND2.COM` (for example with `mcopy`
+from the `mtools` package).
 
 ### Running
 
@@ -167,120 +188,131 @@ openmsx -machine Philips_NMS_8250 \
         -ext unapinet
 ```
 
-The Nextor HD image must contain `NEXTOR.SYS` and `COMMAND2.COM`.
-Copy `unapinet.com` to the HD image (e.g. with `mcopy` from mtools).
-Run `UNAPINET.COM` at the Nextor prompt to install the TSR.
+At the Nextor prompt, run `UNAPINET.COM` once to install the TSR. From
+that point on, any UNAPI TCP/IP client will discover the implementation
+through `EXTBIO` and route its calls through the bridge.
 
-## I/O protocol
+## Bridge protocol
 
-The extension uses two I/O ports for all communication between the
-Z80 TSR and the C++ host code.
-
-### Port map
+All communication between the Z80 TSR and the C++ device flows through two
+I/O ports.
 
 | Port | Write | Read |
 |------|-------|------|
-| 7Eh  | Command byte (triggers execution) | Status (00=OK, 01=ERR, 02=DATA) |
-| 7Fh  | Parameter byte (accumulated in buffer) | Result byte (auto-advancing) |
+| 7Eh  | Command byte; triggers execution | Status (00=OK, 01=ERR, 02=DATA available) |
+| 7Fh  | Parameter byte; appended to a per-command buffer | Result byte; auto-advances on each read |
 
-### Flow
+The MSX appends parameter bytes to port 7Fh, then writes a command byte
+to port 7Eh. The device processes the command synchronously (DNS is
+serviced asynchronously through a worker thread but its dispatch is
+non-blocking), populates the result buffer, and signals `DATA available`
+on port 7Eh. The MSX then reads the result bytes sequentially from port
+7Fh.
 
-1. Write 0 or more parameter bytes to port 7Fh (buffered)
-2. Write command byte to port 7Eh (triggers processing)
-3. Read status from port 7Eh until 02h (DATA ready)
-4. Read result bytes from port 7Fh one at a time
+Writing to port 7Fh while a previous result is still pending discards
+the stale result. This avoids deadlocks if the MSX side fails to drain
+all bytes from a previous call.
 
-Writing to port 7Fh while a previous result is still pending
-automatically discards the old result. This prevents deadlocks
-when the MSX side doesn't consume all result bytes.
+### Bridge command set
 
-### Command table
+| Cmd  | Mnemonic       | Parameters (port 7Fh)                | Result (port 7Fh)                   |
+|------|----------------|--------------------------------------|-------------------------------------|
+| 00h  | `PING`         | -                                    | 1 byte: ABh                         |
+| 01h  | `DNS_QUERY`    | hostname + 00h                       | 1 byte status [+ 4 bytes IP]        |
+| 02h  | `DNS_STATUS`   | -                                    | 1 byte status [+ 4 bytes IP]        |
+| 03h  | `TCP_OPEN`     | IP[4] + port[2 LE]                   | 1 byte handle (0 = error)           |
+| 04h  | `TCP_SEND`     | handle + len[2 LE] + data            | 1 byte status                       |
+| 05h  | `TCP_RECV`     | handle + maxlen[2 LE]                | len[2 LE] + data                    |
+| 06h  | `TCP_CLOSE`    | handle                               | 1 byte status                       |
+| 07h  | `TCP_STATE`    | handle                               | state + avail[2 LE] + close_reason  |
+| 08h  | `TCP_ABORT`    | handle                               | 1 byte status                       |
+| 09h  | `UDP_OPEN`     | local_port[2 LE]                     | 1 byte handle (0 = error)           |
+| 0Ah  | `UDP_CLOSE`    | handle                               | 1 byte status                       |
+| 0Bh  | `UDP_STATE`    | handle                               | size[2 LE] of next datagram         |
+| 0Ch  | `UDP_SEND`     | handle + dest_IP[4] + port[2 LE] + len[2 LE] + data | 1 byte status        |
+| 0Dh  | `GET_LOCALIP`  | -                                    | 4 bytes IP (network order)          |
+| 0Eh  | `NET_STATE`    | -                                    | 1 byte (2 = open)                   |
+| 0Fh  | `UDP_RECV`     | handle + maxlen[2 LE]                | src_IP[4] + src_port[2 LE] + len[2 LE] + data |
+| 10h  | `QUERY_CAP`    | -                                    | 2 bytes: cap0, cap1                 |
 
-| Cmd  | Name        | Parameters (via 7Fh)       | Result (via 7Fh)                    |
-|------|-------------|----------------------------|-------------------------------------|
-| 00h  | PING        | --                         | 1 byte: ABh (magic)                |
-| 01h  | DNS_QUERY   | hostname + 00h             | 1b status [+ 4b IP if immediate]   |
-| 02h  | DNS_STATUS  | --                         | 1b status [+ 4b IP if complete]    |
-| 03h  | TCP_OPEN    | IP[4] + port[2 LE]         | 1b handle (0 = error)              |
-| 04h  | TCP_SEND    | handle + len[2 LE] + data  | 1b status (0 = OK)                 |
-| 05h  | TCP_RECV    | handle + maxlen[2 LE]      | len[2 LE] + data                   |
-| 06h  | TCP_CLOSE   | handle                     | 1b status                          |
-| 07h  | TCP_STATE   | handle                     | state + avail[2 LE] + close_reason |
-| 08h  | TCP_ABORT   | handle                     | 1b status                          |
-| 0Dh  | GET_LOCALIP | --                         | 4 bytes IP (big-endian)            |
-| 0Eh  | NET_STATE   | --                         | 1b state (2 = open)                |
-| 10h  | QUERY_CAP   | --                         | 2 bytes: cap0, cap1                |
+### UNAPI dispatch table
 
-### UNAPI functions implemented
+| Fn | UNAPI name        | Backed by             |
+|----|-------------------|-----------------------|
+| 0  | `UNAPI_GET_INFO`  | local                 |
+| 1  | `TCPIP_GET_CAPAB` | local (hardcoded)     |
+| 2  | `TCPIP_GET_IPINFO`| `GET_LOCALIP` (idx 1) |
+| 3  | `TCPIP_NET_STATE` | `NET_STATE`           |
+| 6  | `TCPIP_DNS_Q`     | `DNS_QUERY`           |
+| 7  | `TCPIP_DNS_S`     | `DNS_STATUS`          |
+| 8  | `TCPIP_UDP_OPEN`  | `UDP_OPEN`            |
+| 9  | `TCPIP_UDP_CLOSE` | `UDP_CLOSE`           |
+| 10 | `TCPIP_UDP_STATE` | `UDP_STATE`           |
+| 11 | `TCPIP_UDP_SEND`  | `UDP_SEND`            |
+| 12 | `TCPIP_UDP_RCV`   | `UDP_RECV`            |
+| 13 | `TCPIP_TCP_OPEN`  | `TCP_OPEN`            |
+| 14 | `TCPIP_TCP_CLOSE` | `TCP_CLOSE`           |
+| 15 | `TCPIP_TCP_ABORT` | `TCP_ABORT`           |
+| 16 | `TCPIP_TCP_STATE` | `TCP_STATE`           |
+| 17 | `TCPIP_TCP_SEND`  | `TCP_SEND`            |
+| 18 | `TCPIP_TCP_RCV`   | `TCP_RECV`            |
+| 29 | `TCPIP_WAIT`      | local (`ei`/`halt`)   |
+| *  | (others)          | `ERR_NOT_IMP`         |
 
-| Fn | Name            | Bridge cmd | Notes                          |
-|----|-----------------|------------|--------------------------------|
-| 0  | UNAPI_GET_INFO  | (local)    | Returns impl name, version     |
-| 1  | TCPIP_GET_CAPAB | (local)    | Hardcoded caps (DNS + TCP)     |
-| 2  | TCPIP_GET_IPINFO| 0Dh        | Local IP from host, rest fixed |
-| 3  | TCPIP_NET_STATE | 0Eh        | Always "open"                  |
-| 6  | TCPIP_DNS_Q     | 01h        | Async DNS start                |
-| 7  | TCPIP_DNS_S     | 02h        | DNS poll/result                |
-| 13 | TCPIP_TCP_OPEN  | 03h        | Non-blocking connect           |
-| 14 | TCPIP_TCP_CLOSE | 06h        | Graceful close (FIN)           |
-| 15 | TCPIP_TCP_ABORT | 08h        | Immediate close (RST)          |
-| 16 | TCPIP_TCP_STATE | 07h        | Connection state + avail bytes |
-| 17 | TCPIP_TCP_SEND  | 04h        | Send data                      |
-| 18 | TCPIP_TCP_RCV   | 05h        | Receive data                   |
-| *  | (others)        | --         | Returns ERR_NOT_IMP            |
+## Implementation notes
 
-### TCP states (from UNAPI spec)
+### Device side (C++)
 
-| Value | State       |
-|-------|-------------|
-| 0     | CLOSED      |
-| 2     | SYN_SENT    |
-| 4     | ESTABLISHED |
-| 7     | CLOSE_WAIT  |
+- A `SocketActivator` RAII wrapper drives `WSAStartup` / `WSACleanup` on
+  Windows.
+- A background thread (`receiverLoop`) runs continuously while the device
+  is alive. It iterates over all open TCP and UDP sockets, polls them with
+  `select()` on a 10 ms cadence, drains any pending data into per-socket
+  queues, and detects connection state transitions (`SYN_SENT` →
+  `ESTABLISHED`, remote half-close → `CLOSE_WAIT`).
+- DNS resolution is offloaded to a detached worker thread so that the
+  emulator does not block during `getaddrinfo()`.
+- `connect()` is always issued non-blocking; the receiver loop completes
+  the connection state machine.
+- The header deliberately uses `intptr_t` for socket descriptors so that
+  `winsock2.h` can stay out of the public header. `winsock2.h` transitively
+  pulls in `windows.h`, which defines `interface` as a preprocessor macro
+  that breaks unrelated openMSX headers.
 
-## C++ extension internals
+### TSR side (Z80)
 
-- **SocketActivator**: RAII wrapper for WSAStartup on Windows
-- **Background thread** (`receiverLoop`): polls all active TCP sockets
-  with `select()` every 10ms, buffers incoming data in per-connection
-  `std::deque<uint8_t>`, detects connect completion (SYN_SENT ->
-  ESTABLISHED) and remote close (CLOSE_WAIT)
-- **DNS thread**: `getaddrinfo()` runs in a detached thread; MSX polls
-  via DNS_STATUS
-- **Non-blocking connect**: `connect()` returns WSAEWOULDBLOCK/EINPROGRESS;
-  `receiverLoop` detects completion via writable fd_set
-- **intptr_t for SOCKET**: avoids including `winsock2.h` in the header
-  (which defines a `interface` macro that breaks other openMSX headers)
-- **Save states**: network state is not serialized; connections are lost
-  on save/load
+- The TSR follows Konamiman's reference RAM-resident pattern:
+  installer at 0100h allocates a system mapper segment via DOS 2 mapper
+  routines, copies the resident block to 4000h of that segment, and
+  patches `EXTBIO` to use the RAM helper's segment-call routine.
+- The dispatcher at `UNAPI_ENTRY` runs each implemented function with
+  `ei` immediately preceding the final `ret`. This is required because
+  Nextor's RAM helper does not unconditionally re-enable interrupts on
+  return, and several UNAPI clients rely on `*SYSTIMER` (0FC9Eh) ticking
+  while they spin.
+- `TCPIP_WAIT` (function 29) is intercepted ahead of the dispatch table
+  via a fast path. The implementation is `ei` / `halt` / `ret`, which
+  blocks until the next 50/60 Hz interrupt and matches the spec
+  ("block until the next timer interrupt has completed its processing
+  step").
 
-## Known issues
+### TCP_CLOSE serialisation
 
-- **DLL dependencies**: the Windows build links dynamically (required for
-  Tcl). All DLLs from `/mingw64/bin/` must be copied to the binary dir.
-- **openMSX RELEASE_21_0 build**: requires 4 patches for MSYS2
-  compatibility (see Build section above).
-
-## Notes on tricky bugs that were fixed
-
-- **TCPIP_WAIT (fn 29) is mandatory**: some clients (like hget) have a busy-wait
-  loop `while(*SYSTIMER == saved);` right after calling `UnapiCall(TCPIP_WAIT)`.
-  If WAIT returns immediately without letting the timer tick advance, that loop
-  is infinite. The implementation uses `ei`/`halt` to block until the next
-  timer interrupt fires.
-- **Deadlock in `cmdTcpClose`**: early versions acquired the per-connection
-  `std::mutex` and then called `closeTcpSocket()` which tried to acquire it
-  again. `std::mutex` is not recursive -- that hung the whole emulator.
-  Fixed by just doing `shutdown(SD_SEND)` in the close handler and letting
-  the background `recvLoop` thread detect the remote close via `recv()==0`.
+`cmdTcpClose` issues `shutdown(SD_SEND)` and transitions the connection
+to `CLOSE_WAIT`. It does **not** call `closesocket()` or take the
+per-connection mutex while transitioning. Both responsibilities are
+delegated to the receiver loop, which observes `recv() == 0` (peer FIN)
+and tears the socket down. Holding the mutex across both `shutdown()`
+and `closesocket()` deadlocks the emulator if the receiver thread is
+concurrently calling into the same socket.
 
 ## References
 
-- [MSX UNAPI specification](https://github.com/Konamiman/MSX-UNAPI-specification)
+- [MSX UNAPI specification (Konamiman)](https://github.com/Konamiman/MSX-UNAPI-specification)
 - [openMSX](https://openmsx.org/)
 - [Nextor](https://github.com/Konamiman/Nextor)
-- [Nestor80](https://github.com/Konamiman/Nestor80)
-- [Telnet client source](https://github.com/ducasp/MSX-Development/tree/master/UNAPI/TELNET) (by Oduvaldo Pavan Junior)
+- [Nestor80 assembler](https://github.com/Konamiman/Nestor80)
+- [TFTP / hget / telnet for MSX UNAPI (ducasp)](https://github.com/ducasp/MSX-Development/tree/master/UNAPI)
 
 ## License
 

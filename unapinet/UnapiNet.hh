@@ -58,8 +58,13 @@ private:
     static constexpr uint8_t CMD_TCP_CLOSE  = 0x06;
     static constexpr uint8_t CMD_TCP_STATE  = 0x07;
     static constexpr uint8_t CMD_TCP_ABORT  = 0x08;
+    static constexpr uint8_t CMD_UDP_OPEN   = 0x09;
+    static constexpr uint8_t CMD_UDP_CLOSE  = 0x0A;
+    static constexpr uint8_t CMD_UDP_STATE  = 0x0B;
+    static constexpr uint8_t CMD_UDP_SEND   = 0x0C;
     static constexpr uint8_t CMD_GET_LOCALIP = 0x0D;
     static constexpr uint8_t CMD_NET_STATE  = 0x0E;
+    static constexpr uint8_t CMD_UDP_RECV   = 0x0F;
     static constexpr uint8_t CMD_QUERY_CAP  = 0x10;
 
     // --- Status register values ---
@@ -106,6 +111,24 @@ private:
     };
     TcpConnection tcp[MAX_TCP]; // handles 1..MAX_TCP
 
+    // --- Conexiones UDP ---
+    static constexpr int MAX_UDP = 4;
+
+    struct UdpDatagram {
+        uint32_t srcIP = 0;
+        uint16_t srcPort = 0;
+        std::vector<uint8_t> data;
+    };
+
+    struct UdpConnection {
+        intptr_t sock = INVALID_SOCK;
+        uint16_t localPort = 0;
+        bool     resident = false;
+        std::deque<UdpDatagram> recvQueue;
+        std::mutex mutex;
+    };
+    UdpConnection udp[MAX_UDP];
+
     // --- DNS asíncrono ---
     struct {
         std::atomic<int> status{0}; // 0=idle 1=in_progress 2=complete 3=error
@@ -133,6 +156,11 @@ private:
     void cmdTcpAbort();
     void cmdGetLocalIP();
     void cmdNetState();
+    void cmdUdpOpen();
+    void cmdUdpClose();
+    void cmdUdpState();
+    void cmdUdpSend();
+    void cmdUdpRecv();
 
     // --- Helpers ---
     void setResult(const uint8_t* data, size_t len);
@@ -142,6 +170,8 @@ private:
 
     int  allocTcpHandle();
     void closeTcpSocket(int h);
+    int  allocUdpHandle();
+    void closeUdpSocket(int h);
     void closeAllConnections();
 
     static void setNonBlocking(intptr_t s);

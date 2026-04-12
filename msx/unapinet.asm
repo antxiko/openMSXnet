@@ -45,8 +45,13 @@ CMD_TCP_RECV:   equ     05h
 CMD_TCP_CLOSE:  equ     06h
 CMD_TCP_STATE:  equ     07h
 CMD_TCP_ABORT:  equ     08h
+CMD_UDP_OPEN:   equ     09h
+CMD_UDP_CLOSE:  equ     0Ah
+CMD_UDP_STATE:  equ     0Bh
+CMD_UDP_SEND:   equ     0Ch
 CMD_GET_LOCALIP: equ    0Dh
 CMD_NET_STATE:  equ     0Eh
+CMD_UDP_RECV:   equ     0Fh
 
 ; --- Bridge status
 STATUS_OK:      equ     00h
@@ -536,11 +541,11 @@ FN_TABLE:
         dw      FN_UNDEF        ; 5  TCPIP_RCV_ECHO
         dw      FN_DNS_Q        ; 6  TCPIP_DNS_Q
         dw      FN_DNS_S        ; 7  TCPIP_DNS_S
-        dw      FN_UNDEF        ; 8  TCPIP_UDP_OPEN
-        dw      FN_UNDEF        ; 9  TCPIP_UDP_CLOSE
-        dw      FN_UNDEF        ; 10 TCPIP_UDP_STATE
-        dw      FN_UNDEF        ; 11 TCPIP_UDP_SEND
-        dw      FN_UNDEF        ; 12 TCPIP_UDP_RCV
+        dw      FN_UDP_OPEN     ; 8  TCPIP_UDP_OPEN
+        dw      FN_UDP_CLOSE    ; 9  TCPIP_UDP_CLOSE
+        dw      FN_UDP_STATE    ; 10 TCPIP_UDP_STATE
+        dw      FN_UDP_SEND     ; 11 TCPIP_UDP_SEND
+        dw      FN_UDP_RCV      ; 12 TCPIP_UDP_RCV
         dw      FN_TCP_OPEN     ; 13 TCPIP_TCP_OPEN
         dw      FN_TCP_CLOSE    ; 14 TCPIP_TCP_CLOSE
         dw      FN_TCP_ABORT    ; 15 TCPIP_TCP_ABORT
@@ -589,9 +594,9 @@ FN_GET_CAPAB:
         ei
         ret
 
-.cap1:  ; Capabilities: bit2=DNS, bit3=TCP active
-        ld      hl,000Ch
-        ld      de,000Ch        ; features = capabilities
+.cap1:  ; Capabilities: bit2=DNS, bit3=TCP active, bit10=UDP
+        ld      hl,040Ch        ; 0x0400 | 0x000C
+        ld      de,040Ch
         ld      b,0             ; link level: unknown
         xor     a
         ei
@@ -599,9 +604,9 @@ FN_GET_CAPAB:
 
 .cap2:  ; Connection pool
         ld      b,4             ; max TCP
-        ld      c,0             ; max UDP
+        ld      c,4             ; max UDP
         ld      d,4             ; free TCP (approximate)
-        ld      e,0             ; free UDP
+        ld      e,4             ; free UDP (approximate)
         ld      h,0             ; max raw
         ld      l,0             ; free raw
         xor     a
@@ -1071,6 +1076,259 @@ FN_TCP_RCV:
         ret
 
 
+;--- Function 8: TCPIP_UDP_OPEN
+;    Input: HL=local port (0xFFFF=random), B=lifetime (0=transient, 1=resident)
+;    Output: A=err, B=handle
+
+FN_UDP_OPEN:
+        ld      a,l
+        out     (IO_DATA),a     ; port low
+        ld      a,h
+        out     (IO_DATA),a     ; port high
+        ld      a,CMD_UDP_OPEN
+        out     (IO_CMD),a
+
+        in      a,(IO_CMD)
+        cp      STATUS_DATA
+        jr      nz,.uo_err
+        in      a,(IO_DATA)     ; handle
+        or      a
+        jr      z,.uo_err
+        ld      b,a
+        xor     a
+        ei
+        ret
+.uo_err:
+        ld      a,ERR_NO_FREE_CONN
+        ei
+        ret
+
+
+;--- Function 9: TCPIP_UDP_CLOSE
+;    Input: B=handle (0 = close all transient)
+;    Output: A=err
+
+FN_UDP_CLOSE:
+        ld      a,b
+        out     (IO_DATA),a
+        ld      a,CMD_UDP_CLOSE
+        out     (IO_CMD),a
+        in      a,(IO_CMD)
+        cp      STATUS_DATA
+        jr      nz,.uc_err
+        in      a,(IO_DATA)
+        xor     a
+        ei
+        ret
+.uc_err:
+        ld      a,ERR_NO_CONN
+        ei
+        ret
+
+
+;--- Function 10: TCPIP_UDP_STATE
+;    Input: B=handle
+;    Output: A=err, HL=size of first datagram (0 if none)
+
+FN_UDP_STATE:
+        ld      a,b
+        out     (IO_DATA),a
+        ld      a,CMD_UDP_STATE
+        out     (IO_CMD),a
+        in      a,(IO_CMD)
+        cp      STATUS_DATA
+        jr      nz,.ustate_err
+        in      a,(IO_DATA)     ; size low
+        ld      l,a
+        in      a,(IO_DATA)     ; size high
+        ld      h,a
+        xor     a
+        ei
+        ret
+.ustate_err:
+        ld      hl,0
+        ld      a,ERR_NO_CONN
+        ei
+        ret
+
+
+;--- Function 11: TCPIP_UDP_SEND
+;    Input: B=handle, HL=data ptr, DE=parameter block ptr
+;      param block: IP[4] + port[2 LE] + size[2 LE]
+;    Output: A=err
+
+FN_UDP_SEND:
+        ; Save inputs to temporary storage
+        ld      (UDP_TMP_HND),a  ; will be overwritten, but save B first
+        ld      a,b
+        ld      (UDP_TMP_HND),a
+        ld      (UDP_TMP_DATA),hl
+        ld      (UDP_TMP_PBLK),de
+
+        ; Read param block (8 bytes)
+        ld      hl,(UDP_TMP_PBLK)
+        ld      a,(hl)
+        ld      (UDP_TMP_IP0),a
+        inc     hl
+        ld      a,(hl)
+        ld      (UDP_TMP_IP1),a
+        inc     hl
+        ld      a,(hl)
+        ld      (UDP_TMP_IP2),a
+        inc     hl
+        ld      a,(hl)
+        ld      (UDP_TMP_IP3),a
+        inc     hl
+        ld      a,(hl)
+        ld      (UDP_TMP_PORTL),a
+        inc     hl
+        ld      a,(hl)
+        ld      (UDP_TMP_PORTH),a
+        inc     hl
+        ld      a,(hl)
+        ld      (UDP_TMP_LENL),a
+        inc     hl
+        ld      a,(hl)
+        ld      (UDP_TMP_LENH),a
+
+        ; Write: handle, IP[4], port[2], len[2]
+        ld      a,(UDP_TMP_HND)
+        out     (IO_DATA),a
+        ld      a,(UDP_TMP_IP0)
+        out     (IO_DATA),a
+        ld      a,(UDP_TMP_IP1)
+        out     (IO_DATA),a
+        ld      a,(UDP_TMP_IP2)
+        out     (IO_DATA),a
+        ld      a,(UDP_TMP_IP3)
+        out     (IO_DATA),a
+        ld      a,(UDP_TMP_PORTL)
+        out     (IO_DATA),a
+        ld      a,(UDP_TMP_PORTH)
+        out     (IO_DATA),a
+        ld      a,(UDP_TMP_LENL)
+        out     (IO_DATA),a
+        ld      a,(UDP_TMP_LENH)
+        out     (IO_DATA),a
+
+        ; Write data bytes
+        ld      hl,(UDP_TMP_DATA)
+        ld      a,(UDP_TMP_LENL)
+        ld      c,a
+        ld      a,(UDP_TMP_LENH)
+        ld      b,a
+.usend_d:  ld      a,b
+        or      c
+        jr      z,.usend_exec
+        ld      a,(hl)
+        out     (IO_DATA),a
+        inc     hl
+        dec     bc
+        jr      .usend_d
+
+.usend_exec:
+        ld      a,CMD_UDP_SEND
+        out     (IO_CMD),a
+        in      a,(IO_CMD)
+        cp      STATUS_DATA
+        jr      nz,.usend_err
+        in      a,(IO_DATA)
+        or      a
+        jr      nz,.usend_err
+        xor     a
+        ei
+        ret
+.usend_err:
+        ld      a,ERR_CONN_STATE
+        ei
+        ret
+
+
+;--- Function 12: TCPIP_UDP_RCV
+;    Input: B=handle, HL=buffer ptr, DE=max size
+;    Output: A=err, L.H.E.D=source IP, IX=source port, BC=received size
+
+FN_UDP_RCV:
+        ld      (UDP_TMP_DATA),hl   ; save user buffer ptr
+        ld      a,b
+        out     (IO_DATA),a
+        ld      a,e
+        out     (IO_DATA),a          ; maxlen low
+        ld      a,d
+        out     (IO_DATA),a          ; maxlen high
+        ld      a,CMD_UDP_RECV
+        out     (IO_CMD),a
+
+        in      a,(IO_CMD)
+        cp      STATUS_DATA
+        jr      nz,.ur_none
+
+        ; Read srcIP[4] and save to vars
+        in      a,(IO_DATA)
+        ld      (UDP_TMP_IP0),a
+        in      a,(IO_DATA)
+        ld      (UDP_TMP_IP1),a
+        in      a,(IO_DATA)
+        ld      (UDP_TMP_IP2),a
+        in      a,(IO_DATA)
+        ld      (UDP_TMP_IP3),a
+        ; srcPort[2]
+        in      a,(IO_DATA)
+        ld      (UDP_TMP_PORTL),a
+        in      a,(IO_DATA)
+        ld      (UDP_TMP_PORTH),a
+        ; actual_len[2]
+        in      a,(IO_DATA)
+        ld      (UDP_TMP_LENL),a
+        in      a,(IO_DATA)
+        ld      (UDP_TMP_LENH),a
+
+        ; Copy data to user buffer
+        ld      hl,(UDP_TMP_DATA)    ; dest
+        ld      a,(UDP_TMP_LENL)
+        ld      c,a
+        ld      a,(UDP_TMP_LENH)
+        ld      b,a
+.ur_d:  ld      a,b
+        or      c
+        jr      z,.ur_done
+        in      a,(IO_DATA)
+        ld      (hl),a
+        inc     hl
+        dec     bc
+        jr      .ur_d
+
+.ur_done:
+        ; Set output registers
+        ld      a,(UDP_TMP_IP0)
+        ld      l,a
+        ld      a,(UDP_TMP_IP1)
+        ld      h,a
+        ld      a,(UDP_TMP_IP2)
+        ld      e,a
+        ld      a,(UDP_TMP_IP3)
+        ld      d,a
+        ld      a,(UDP_TMP_PORTL)
+        ld      ixl,a
+        ld      a,(UDP_TMP_PORTH)
+        ld      ixh,a
+        ld      a,(UDP_TMP_LENL)
+        ld      c,a
+        ld      a,(UDP_TMP_LENH)
+        ld      b,a
+        xor     a
+        ei
+        ret
+
+.ur_none:
+        ld      bc,0
+        ld      hl,0
+        ld      de,0
+        ld      a,ERR_NO_DATA
+        ei
+        ret
+
+
 ;--- Function 29: TCPIP_WAIT (MANDATORY per UNAPI spec 1.1)
 ;    Block until next 50/60Hz timer tick, then return ERR_OK.
 ;    Polls *FC9Eh (JIFFY counter, page 3 always mapped).
@@ -1104,6 +1362,19 @@ TOUPPER:
 
 MY_SLOT:        db      0
 MY_SEG:         db      0
+
+; --- Scratch storage for UDP send/recv marshaling ---
+UDP_TMP_HND:    db      0
+UDP_TMP_IP0:    db      0
+UDP_TMP_IP1:    db      0
+UDP_TMP_IP2:    db      0
+UDP_TMP_IP3:    db      0
+UDP_TMP_PORTL:  db      0
+UDP_TMP_PORTH:  db      0
+UDP_TMP_LENL:   db      0
+UDP_TMP_LENH:   db      0
+UDP_TMP_DATA:   dw      0
+UDP_TMP_PBLK:   dw      0
 
 UNAPI_ID:
         db      "TCP/IP",0
