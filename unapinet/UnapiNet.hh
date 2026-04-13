@@ -66,6 +66,8 @@ private:
     static constexpr uint8_t CMD_NET_STATE  = 0x0E;
     static constexpr uint8_t CMD_UDP_RECV   = 0x0F;
     static constexpr uint8_t CMD_QUERY_CAP  = 0x10;
+    static constexpr uint8_t CMD_ICMP_SEND  = 0x11;
+    static constexpr uint8_t CMD_ICMP_RECV  = 0x12;
 
     // --- Status register values ---
     static constexpr uint8_t STATUS_OK    = 0x00;
@@ -129,6 +131,27 @@ private:
     };
     UdpConnection udp[MAX_UDP];
 
+    // --- ICMP echo reply queue ---
+    struct IcmpReply {
+        uint32_t srcIP = 0;
+        uint8_t  ttl = 0;
+        uint16_t identifier = 0;
+        uint16_t sequence = 0;
+        uint16_t dataLen = 0;
+    };
+    std::deque<IcmpReply> icmpReplies;
+    std::mutex icmpMutex;
+    std::thread icmpWorker;
+    std::atomic<bool> icmpPending{false};
+    // ICMP request for worker to handle
+    struct IcmpRequest {
+        uint32_t dstIP;
+        uint8_t  ttl;
+        uint16_t identifier;
+        uint16_t sequence;
+        uint16_t dataLen;
+    } icmpRequest;
+
     // --- DNS asíncrono ---
     struct {
         std::atomic<int> status{0}; // 0=idle 1=in_progress 2=complete 3=error
@@ -161,6 +184,9 @@ private:
     void cmdUdpState();
     void cmdUdpSend();
     void cmdUdpRecv();
+    void cmdIcmpSend();
+    void cmdIcmpRecv();
+    void icmpWorkerLoop();
 
     // --- Helpers ---
     void setResult(const uint8_t* data, size_t len);

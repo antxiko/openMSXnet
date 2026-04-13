@@ -52,6 +52,8 @@ CMD_UDP_SEND:   equ     0Ch
 CMD_GET_LOCALIP: equ    0Dh
 CMD_NET_STATE:  equ     0Eh
 CMD_UDP_RECV:   equ     0Fh
+CMD_ICMP_SEND:  equ     11h
+CMD_ICMP_RECV:  equ     12h
 
 ; --- Bridge status
 STATUS_OK:      equ     00h
@@ -537,8 +539,8 @@ FN_TABLE:
         dw      FN_GET_CAPAB    ; 1  TCPIP_GET_CAPAB
         dw      FN_GET_IPINFO   ; 2  TCPIP_GET_IPINFO
         dw      FN_NET_STATE    ; 3  TCPIP_NET_STATE
-        dw      FN_UNDEF        ; 4  TCPIP_SEND_ECHO
-        dw      FN_UNDEF        ; 5  TCPIP_RCV_ECHO
+        dw      FN_SEND_ECHO    ; 4  TCPIP_SEND_ECHO
+        dw      FN_RCV_ECHO     ; 5  TCPIP_RCV_ECHO
         dw      FN_DNS_Q        ; 6  TCPIP_DNS_Q
         dw      FN_DNS_S        ; 7  TCPIP_DNS_S
         dw      FN_UDP_OPEN     ; 8  TCPIP_UDP_OPEN
@@ -594,9 +596,9 @@ FN_GET_CAPAB:
         ei
         ret
 
-.cap1:  ; Capabilities: bit2=DNS, bit3=TCP active, bit10=UDP
-        ld      hl,040Ch        ; 0x0400 | 0x000C
-        ld      de,040Ch
+.cap1:  ; Capabilities: bit0=PING, bit2=DNS, bit3=TCP active, bit10=UDP
+        ld      hl,040Dh        ; 0x0400 | 0x000C | 0x0001
+        ld      de,040Dh
         ld      b,0             ; link level: unknown
         xor     a
         ei
@@ -1071,6 +1073,71 @@ FN_TCP_RCV:
         pop     de
         ld      bc,0
         ld      hl,0
+        ld      a,ERR_NO_DATA
+        ei
+        ret
+
+
+;--- Function 4: TCPIP_SEND_ECHO
+;    Input: HL = parameter block (11 bytes)
+;      +0..+3: IP, +4: TTL, +5..+6: ID, +7..+8: SEQ, +9..+10: len
+;    Output: A = err
+
+FN_SEND_ECHO:
+        ld      b,11
+.se_lp: ld      a,(hl)
+        out     (IO_DATA),a
+        inc     hl
+        djnz    .se_lp
+
+        ld      a,CMD_ICMP_SEND
+        out     (IO_CMD),a
+
+        in      a,(IO_CMD)
+        cp      STATUS_DATA
+        jr      nz,.se_err
+        in      a,(IO_DATA)     ; status byte from bridge
+        or      a
+        jr      nz,.se_err
+        xor     a               ; ERR_OK
+        ei
+        ret
+.se_err:
+        ld      a,ERR_NO_NETWORK
+        ei
+        ret
+
+
+;--- Function 5: TCPIP_RCV_ECHO
+;    Input: HL = buffer (11 bytes) for received echo data
+;    Output: A = err (ERR_OK if got reply, ERR_NO_DATA if queue empty)
+
+FN_RCV_ECHO:
+        push    hl              ; save user buffer
+        ld      a,CMD_ICMP_RECV
+        out     (IO_CMD),a
+
+        in      a,(IO_CMD)
+        cp      STATUS_DATA
+        jr      nz,.re_err
+
+        in      a,(IO_DATA)     ; has_data flag (0=none, 1=yes)
+        or      a
+        jr      z,.re_err
+
+        pop     hl              ; buffer ptr
+        ; Read 11 bytes: IP[4]+TTL[1]+ID[2]+SEQ[2]+len[2]
+        ld      b,11
+.re_lp: in      a,(IO_DATA)
+        ld      (hl),a
+        inc     hl
+        djnz    .re_lp
+
+        xor     a               ; ERR_OK
+        ei
+        ret
+.re_err:
+        pop     hl
         ld      a,ERR_NO_DATA
         ei
         ret

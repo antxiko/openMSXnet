@@ -37,10 +37,11 @@
 // ============================================================
 
 // --- Capabilities para QUERY_CAP (Phase 2) ---
-// Byte 0: bit0=TCP bit1=UDP bit2=DNS  → 0x07 = TCP+UDP+DNS
-// Byte 1: versión bridge = 0x03 (Phase 3 - UDP added)
-static constexpr uint8_t CAP_BYTE0 = 0x07; // TCP + UDP + DNS
-static constexpr uint8_t CAP_BYTE1 = 0x03; // bridge version 3
+// Byte 0: bit0=PING bit1=DNS_HOSTS(local) bit2=DNS bit3=TCP_ACTIVE... (see spec)
+// Bits 0,2,3,10 = PING + DNS + TCP active + UDP
+// Byte 1: bridge version
+static constexpr uint8_t CAP_BYTE0 = 0x0F; // PING + DNS + TCP + UDP caps summary
+static constexpr uint8_t CAP_BYTE1 = 0x04; // bridge version 4
 
 // Tamaño máximo de transferencia por comando TCP_SEND/TCP_RECV
 static constexpr size_t MAX_TRANSFER = 4096;
@@ -68,22 +69,18 @@ UnapiNet::UnapiNet(const DeviceConfig& config)
     paramBuf.reserve(MAX_TRANSFER + 16);
     resultBuf.reserve(MAX_TRANSFER + 16);
 
-    // Arrancar hilo receptor
+    // Arrancar hilos de fondo
     running = true;
     recvThread = std::thread([this]() { receiverLoop(); });
+    icmpWorker = std::thread([this]() { icmpWorkerLoop(); });
 }
 
 UnapiNet::~UnapiNet()
 {
-    // Parar hilo receptor
     running = false;
-    if (recvThread.joinable()) {
-        recvThread.join();
-    }
-    // Esperar hilo DNS si hay uno
-    if (dnsThread.joinable()) {
-        dnsThread.join();
-    }
+    if (recvThread.joinable()) recvThread.join();
+    if (icmpWorker.joinable()) icmpWorker.join();
+    if (dnsThread.joinable())  dnsThread.join();
     closeAllConnections();
 }
 
@@ -431,6 +428,8 @@ void UnapiNet::processCmd(uint8_t cmd)
     case CMD_UDP_STATE:  cmdUdpState();  break;
     case CMD_UDP_SEND:   cmdUdpSend();   break;
     case CMD_UDP_RECV:   cmdUdpRecv();   break;
+    case CMD_ICMP_SEND:  cmdIcmpSend();  break;
+    case CMD_ICMP_RECV:  cmdIcmpRecv();  break;
     default:
         setError();
         break;
@@ -1192,6 +1191,161 @@ void UnapiNet::cmdUdpRecv()
         result.push_back(dg.data[i]);
     }
     setResultVec(result);
+}
+
+// ============================================================
+//  ICMP Echo (ping)
+//
+//  Uses the Windows IcmpSendEcho API (doesn't require admin).
+//  A worker thread handles the (blocking) call and pushes replies
+//  to a queue that the MSX polls via RCV_ECHO.
+// ============================================================
+
+#ifdef _WIN32
+// Minimal declarations to avoid pulling iphlpapi.h / icmpapi.h
+// (which trigger the "interface" macro conflict in windows.h).
+extern "C" {
+    struct IcmpIpOptions {
+        unsigned char Ttl;
+        unsigned char Tos;
+        unsigned char Flags;
+        unsigned char OptionsSize;
+        unsigned char* OptionsData;
+    };
+    struct IcmpEchoReply {
+        unsigned long  Address;
+        unsigned long  Status;
+        unsigned long  RoundTripTime;
+        unsigned short DataSize;
+        unsigned short Reserved;
+        void*          Data;
+        IcmpIpOptions  Options;
+    };
+    __declspec(dllimport) void* __stdcall IcmpCreateFile(void);
+    __declspec(dllimport) int   __stdcall IcmpCloseHandle(void*);
+    __declspec(dllimport) unsigned long __stdcall IcmpSendEcho(
+        void* h, unsigned long addr,
+        void* data, unsigned short size,
+        IcmpIpOptions* opts,
+        void* reply, unsigned long replySize,
+        unsigned long timeout);
+}
+#pragma comment(lib, "iphlpapi.lib")
+#endif
+
+void UnapiNet::icmpWorkerLoop()
+{
+#ifdef _WIN32
+    void* hIcmp = IcmpCreateFile();
+    if (!hIcmp || hIcmp == reinterpret_cast<void*>(-1)) return;
+
+    while (running) {
+        if (!icmpPending.exchange(false)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
+
+        IcmpRequest req = icmpRequest;
+
+        std::vector<uint8_t> payload(req.dataLen);
+        for (size_t i = 0; i < payload.size(); i++)
+            payload[i] = static_cast<uint8_t>(i);
+
+        unsigned long replySize = sizeof(IcmpEchoReply) + req.dataLen + 8;
+        std::vector<uint8_t> replyBuf(replySize);
+
+        IcmpIpOptions opt = {};
+        opt.Ttl = req.ttl ? req.ttl : 255;
+
+        unsigned long ret = IcmpSendEcho(hIcmp,
+                                         htonl(req.dstIP),
+                                         payload.empty() ? nullptr : payload.data(),
+                                         static_cast<unsigned short>(payload.size()),
+                                         &opt,
+                                         replyBuf.data(),
+                                         replySize,
+                                         2000);
+
+        if (ret > 0) {
+            auto* reply = reinterpret_cast<IcmpEchoReply*>(replyBuf.data());
+            if (reply->Status == 0 /* IP_SUCCESS */) {
+                IcmpReply r;
+                r.srcIP = ntohl(reply->Address);
+                r.ttl = reply->Options.Ttl;
+                r.identifier = req.identifier;
+                r.sequence = req.sequence;
+                r.dataLen = reply->DataSize;
+                std::scoped_lock lock(icmpMutex);
+                if (icmpReplies.size() < 16) icmpReplies.push_back(r);
+            }
+        }
+    }
+
+    IcmpCloseHandle(hIcmp);
+#endif
+}
+
+// SEND_ECHO (0x11)
+// Params: IP[4] + TTL[1] + ID[2] + SEQ[2] + len[2]
+// Result: 1 byte status
+void UnapiNet::cmdIcmpSend()
+{
+    if (paramBuf.size() < 11) {
+        setResultByte(1);
+        return;
+    }
+    icmpRequest.dstIP = (static_cast<uint32_t>(paramBuf[0]) << 24) |
+                       (static_cast<uint32_t>(paramBuf[1]) << 16) |
+                       (static_cast<uint32_t>(paramBuf[2]) <<  8) |
+                       (static_cast<uint32_t>(paramBuf[3]) <<  0);
+    icmpRequest.ttl        = paramBuf[4];
+    icmpRequest.identifier = static_cast<uint16_t>(paramBuf[5]) |
+                             (static_cast<uint16_t>(paramBuf[6]) << 8);
+    icmpRequest.sequence   = static_cast<uint16_t>(paramBuf[7]) |
+                             (static_cast<uint16_t>(paramBuf[8]) << 8);
+    icmpRequest.dataLen    = static_cast<uint16_t>(paramBuf[9]) |
+                             (static_cast<uint16_t>(paramBuf[10]) << 8);
+    if (icmpRequest.dataLen > 512) icmpRequest.dataLen = 512;
+
+    icmpPending = true;
+    setResultByte(0); // OK: request queued
+}
+
+// RCV_ECHO (0x12)
+// Params: -
+// Result: 1 byte has_data + [if 1: IP(4)+TTL(1)+ID(2)+SEQ(2)+len(2) = 11 bytes]
+void UnapiNet::cmdIcmpRecv()
+{
+    IcmpReply r;
+    bool have;
+    {
+        std::scoped_lock lock(icmpMutex);
+        have = !icmpReplies.empty();
+        if (have) {
+            r = icmpReplies.front();
+            icmpReplies.pop_front();
+        }
+    }
+
+    if (!have) {
+        setResultByte(0); // status 0 = no data
+        return;
+    }
+
+    uint8_t res[12];
+    res[0] = 1; // has data
+    res[1] = static_cast<uint8_t>((r.srcIP >> 24) & 0xFF);
+    res[2] = static_cast<uint8_t>((r.srcIP >> 16) & 0xFF);
+    res[3] = static_cast<uint8_t>((r.srcIP >>  8) & 0xFF);
+    res[4] = static_cast<uint8_t>((r.srcIP >>  0) & 0xFF);
+    res[5] = r.ttl;
+    res[6] = static_cast<uint8_t>(r.identifier & 0xFF);
+    res[7] = static_cast<uint8_t>((r.identifier >> 8) & 0xFF);
+    res[8] = static_cast<uint8_t>(r.sequence & 0xFF);
+    res[9] = static_cast<uint8_t>((r.sequence >> 8) & 0xFF);
+    res[10] = static_cast<uint8_t>(r.dataLen & 0xFF);
+    res[11] = static_cast<uint8_t>((r.dataLen >> 8) & 0xFF);
+    setResult(res, 12);
 }
 
 // ============================================================

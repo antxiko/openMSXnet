@@ -45,6 +45,7 @@ UnapiNet device (C++, inside openMSX)
 | TCP active connections | Up to 4 simultaneous, non-blocking `connect()` |
 | TCP send / receive | 64 KiB receive buffer per connection |
 | UDP datagrams | Up to 4 simultaneous, automatic fallback when bind to a privileged port (<1024) is denied |
+| ICMP echo (ping) | Uses Windows `IcmpSendEcho` API; no admin required |
 | `TCPIP_WAIT` (fn 29) | `EI`/`HALT` idiom to release a 50/60 Hz tick |
 | `TCPIP_GET_IPINFO` | Local IP discovered via UDP socket trick to 8.8.8.8 |
 
@@ -53,12 +54,12 @@ Verified against:
 - **`hget`** (HTTP/1.1 chunked transfer, tested with example.com)
 - **`sntp`** (clock synchronisation with `pool.ntp.org`)
 - **`tftp`** (file download from a local TFTP server)
+- **`ping`** (ICMP echo request/reply against 8.8.8.8)
 
 ### Not implemented
 
 | UNAPI function | Reason |
 |----------------|--------|
-| `TCPIP_SEND_ECHO` / `TCPIP_RCV_ECHO` (fn 4-5) | ICMP echo. Not advertised in capabilities. |
 | `TCPIP_TCP_DISCARD` (fn 19) | No client encountered relies on it. |
 | Raw IP (fn 20-24) | Not advertised. |
 | `TCPIP_CONFIG_*` (fn 25-28) | Network configuration is delegated to the host OS. |
@@ -234,6 +235,8 @@ all bytes from a previous call.
 | 0Eh  | `NET_STATE`    | -                                    | 1 byte (2 = open)                   |
 | 0Fh  | `UDP_RECV`     | handle + maxlen[2 LE]                | src_IP[4] + src_port[2 LE] + len[2 LE] + data |
 | 10h  | `QUERY_CAP`    | -                                    | 2 bytes: cap0, cap1                 |
+| 11h  | `ICMP_SEND`    | IP[4] + TTL[1] + ID[2 LE] + SEQ[2 LE] + len[2 LE] | 1 byte status             |
+| 12h  | `ICMP_RECV`    | -                                    | has_data[1] + [IP[4]+TTL[1]+ID[2]+SEQ[2]+len[2]] |
 
 ### UNAPI dispatch table
 
@@ -243,6 +246,8 @@ all bytes from a previous call.
 | 1  | `TCPIP_GET_CAPAB` | local (hardcoded)     |
 | 2  | `TCPIP_GET_IPINFO`| `GET_LOCALIP` (idx 1) |
 | 3  | `TCPIP_NET_STATE` | `NET_STATE`           |
+| 4  | `TCPIP_SEND_ECHO` | `ICMP_SEND`           |
+| 5  | `TCPIP_RCV_ECHO`  | `ICMP_RECV`           |
 | 6  | `TCPIP_DNS_Q`     | `DNS_QUERY`           |
 | 7  | `TCPIP_DNS_S`     | `DNS_STATUS`          |
 | 8  | `TCPIP_UDP_OPEN`  | `UDP_OPEN`            |
