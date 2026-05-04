@@ -596,9 +596,12 @@ FN_GET_CAPAB:
         ei
         ret
 
-.cap1:  ; Capabilities: bit0=PING, bit2=DNS, bit3=TCP active, bit10=UDP
-        ld      hl,040Dh        ; 0x0400 | 0x000C | 0x0001
-        ld      de,040Dh
+.cap1:  ; Capabilities:
+        ; bit0=PING, bit2=DNS, bit3=TCP active,
+        ; bit4=TCP passive (specified remote), bit5=TCP passive (unspec remote),
+        ; bit10=UDP
+        ld      hl,043Dh        ; 0x0400 | 0x0030 | 0x000C | 0x0001
+        ld      de,043Dh
         ld      b,0             ; link level: unknown
         xor     a
         ei
@@ -862,8 +865,9 @@ FN_DNS_S:
 ;    Output: A=err, B=handle
 
 FN_TCP_OPEN:
-        ; Write IP (4 bytes) + port (2 bytes LE) from (HL)
-        ld      b,6
+        ; Write full 11-byte param block to bridge:
+        ;   IP[4] + remote_port[2] + local_port[2] + timeout[2] + flags[1]
+        ld      b,11
 .to_lp: ld      a,(hl)
         out     (IO_DATA),a
         inc     hl
@@ -950,6 +954,17 @@ FN_TCP_STATE:
         cp      STATUS_DATA
         jr      nz,.ts_err
 
+        ; Read 12-byte response from bridge:
+        ;   state, avail[2], close_reason,
+        ;   remote_ip[4], remote_port[2], local_port[2]
+        ; Per UNAPI spec, we return:
+        ;   A=err, B=state, C=close_reason,
+        ;   HL=avail bytes, DE=urgent (always 0 for us),
+        ;   IX=send buffer free space (use a large value)
+        ; The 8 bytes of remote/local info are read and discarded;
+        ; we don't have a way to convey them back through the standard
+        ; UNAPI register interface used by MSXgl-style helpers.
+
         in      a,(IO_DATA)     ; state
         ld      b,a
         in      a,(IO_DATA)     ; avail low
@@ -958,7 +973,14 @@ FN_TCP_STATE:
         ld      h,a
         in      a,(IO_DATA)     ; close reason
         ld      c,a
+        ; discard the next 8 bytes (remote IP/port/local port)
+        push    bc
+        ld      b,8
+.ts_dlp: in     a,(IO_DATA)
+        djnz    .ts_dlp
+        pop     bc
         ld      de,0            ; no urgent data
+        ld      ix,0FFFFh       ; "infinite" send buffer free space
         xor     a
         ei
         ret
@@ -968,6 +990,7 @@ FN_TCP_STATE:
         ld      c,1             ; never used
         ld      hl,0
         ld      de,0
+        ld      ix,0
         ld      a,ERR_NO_CONN
         ei
         ret
@@ -1442,6 +1465,7 @@ UDP_TMP_LENL:   db      0
 UDP_TMP_LENH:   db      0
 UDP_TMP_DATA:   dw      0
 UDP_TMP_PBLK:   dw      0
+TCP_INFO_PTR:   dw      0
 
 UNAPI_ID:
         db      "TCP/IP",0

@@ -44,6 +44,7 @@ UnapiNet device (C++, inside openMSX)
 | DNS resolution | Asynchronous, backed by host `getaddrinfo()` |
 | TCP active connections | Up to 4 simultaneous, non-blocking `connect()` |
 | TCP send / receive | 64 KiB receive buffer per connection |
+| TCP passive mode (listen) | `bind()` + `listen()` with non-blocking `accept()` in the receiver loop |
 | UDP datagrams | Up to 4 simultaneous, automatic fallback when bind to a privileged port (<1024) is denied |
 | ICMP echo (ping) | Uses Windows `IcmpSendEcho` API; no admin required |
 | `TCPIP_WAIT` (fn 29) | `EI`/`HALT` idiom to release a 50/60 Hz tick |
@@ -55,6 +56,7 @@ Verified against:
 - **`sntp`** (clock synchronisation with `pool.ntp.org`)
 - **`tftp`** (file download from a local TFTP server)
 - **`ping`** (ICMP echo request/reply against 8.8.8.8)
+- **MSXon clients** (multiplayer game clients built with MSXgl's `unapi_tcp` library — `tetris.com`, `lobby.com`, etc.)
 
 ### Not implemented
 
@@ -66,10 +68,9 @@ Verified against:
 
 ### Known limitations
 
-- Capabilities advertise TCP active mode and UDP only. TCP passive mode
-  (listen / accept) is not implemented.
 - Save states do not preserve socket state; open connections are lost on
   load.
+- TLS is not supported. Plain HTTP/HTTPS clients work for `http://` only.
 
 ## Repository layout
 
@@ -255,7 +256,7 @@ all bytes from a previous call.
 | 10 | `TCPIP_UDP_STATE` | `UDP_STATE`           |
 | 11 | `TCPIP_UDP_SEND`  | `UDP_SEND`            |
 | 12 | `TCPIP_UDP_RCV`   | `UDP_RECV`            |
-| 13 | `TCPIP_TCP_OPEN`  | `TCP_OPEN`            |
+| 13 | `TCPIP_TCP_OPEN`  | `TCP_OPEN` (active or passive depending on flags) |
 | 14 | `TCPIP_TCP_CLOSE` | `TCP_CLOSE`           |
 | 15 | `TCPIP_TCP_ABORT` | `TCP_ABORT`           |
 | 16 | `TCPIP_TCP_STATE` | `TCP_STATE`           |
@@ -300,6 +301,26 @@ all bytes from a previous call.
   blocks until the next 50/60 Hz interrupt and matches the spec
   ("block until the next timer interrupt has completed its processing
   step").
+
+### `TCPIP_TCP_STATE` must not write to (HL)
+
+Per the UNAPI TCP/IP 1.1 spec, function 16 returns connection state via
+registers (`B`=state, `C`=close_reason, `HL`=available bytes,
+`DE`=urgent bytes, `IX`=output buffer free space). Some clients pass a
+non-zero `HL` to indicate they want a full info block written there, but
+the dominant client library in the wild (MSXgl's `unapi_tcp.asm`) uses
+`HL` purely as the address of its **own** internal struct that it
+populates from the returned registers — it does not expect the
+implementation to write into it. Writing 8 bytes of remote/local
+endpoint info to that pointer corrupts the caller's struct and crashes
+the application a few frames later when the corrupted fields get
+interpreted as buffer pointers.
+
+Resolution: `FN_TCP_STATE` reads the 12-byte response from the bridge,
+returns the first four bytes through registers, and discards the
+remote-IP / port / local-port tail. Servers that genuinely need the
+peer endpoint can recover it from the source address of received data
+in the application protocol.
 
 ### TCP_CLOSE serialisation
 

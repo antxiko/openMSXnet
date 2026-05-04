@@ -297,8 +297,41 @@ void UnapiNet::receiverLoop()
             auto& c = tcp[i];
             if (c.sock == INVALID_SOCK) continue;
 
-            // --- Comprobar connect() pendiente ---
             SOCKET sd = SOCK(c.sock);
+
+            // --- Listening socket: accept non-blocking ---
+            if (c.tcpState == TCP_LISTEN) {
+                fd_set rfds;
+                FD_ZERO(&rfds);
+                FD_SET(sd, &rfds);
+                struct timeval tv = {0, 0};
+                if (select(static_cast<int>(sd) + 1, &rfds, nullptr, nullptr, &tv) <= 0) {
+                    continue;
+                }
+                struct sockaddr_in peer;
+                socklen_t plen = sizeof(peer);
+                SOCKET a = accept(sd, reinterpret_cast<struct sockaddr*>(&peer), &plen);
+                if (a == OPENMSX_INVALID_SOCKET) continue;
+                uint32_t peerIP = ntohl(peer.sin_addr.s_addr);
+                // If remoteIP was specified (non-zero), reject others
+                if (c.remoteIP != 0 && peerIP != c.remoteIP) {
+                    sock_close(a);
+                    continue;
+                }
+                // Replace listening socket with accepted socket
+                sock_close(sd);
+                setNonBlocking(ISOCK(a));
+                int one = 1;
+                setsockopt(a, IPPROTO_TCP, TCP_NODELAY,
+                           reinterpret_cast<const char*>(&one), sizeof(one));
+                c.sock = ISOCK(a);
+                c.tcpState = TCP_ESTABLISHED;
+                c.remoteIP = peerIP;
+                c.remotePort = ntohs(peer.sin_port);
+                continue;
+            }
+
+            // --- Comprobar connect() pendiente ---
             if (c.connecting) {
                 fd_set wfds, efds;
                 FD_ZERO(&wfds);
@@ -585,100 +618,130 @@ void UnapiNet::cmdDnsStatus()
 
 // ============================================================
 //  TCP_OPEN (0x03)
-//  Params: IP[4] + port[2] (little-endian)
+//  Params: IP[4] + remote_port[2 LE] + local_port[2 LE] + timeout[2] + flags[1]
+//  Flags bit 0: passive mode (listen). bit 1: resident.
 //  Result: 1 byte handle (1-4, o 0 si error)
 // ============================================================
 
 void UnapiNet::cmdTcpOpen()
 {
-    if (paramBuf.size() < 6) {
-        setResultByte(0); // error: params insuficientes
+    if (paramBuf.size() < 11) {
+        setResultByte(0);
         return;
     }
 
-    // Extraer IP (big-endian en params: a.b.c.d)
     uint32_t ip = (static_cast<uint32_t>(paramBuf[0]) << 24) |
                   (static_cast<uint32_t>(paramBuf[1]) << 16) |
                   (static_cast<uint32_t>(paramBuf[2]) <<  8) |
                   (static_cast<uint32_t>(paramBuf[3]) <<  0);
-
-    // Extraer port (little-endian en params)
-    uint16_t port = static_cast<uint16_t>(paramBuf[4]) |
-                    (static_cast<uint16_t>(paramBuf[5]) << 8);
+    uint16_t remotePort = static_cast<uint16_t>(paramBuf[4]) |
+                          (static_cast<uint16_t>(paramBuf[5]) << 8);
+    uint16_t localPortReq = static_cast<uint16_t>(paramBuf[6]) |
+                            (static_cast<uint16_t>(paramBuf[7]) << 8);
+    uint8_t flags = paramBuf[10];
+    bool passive  = (flags & 0x01) != 0;
+    bool resident = (flags & 0x02) != 0;
 
     int h = allocTcpHandle();
     if (h == 0) {
-        setResultByte(0); // no hay handles libres
+        setResultByte(0);
         return;
     }
 
     auto& c = tcp[h - 1];
 
-    // Crear socket
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == OPENMSX_INVALID_SOCKET) {
         setResultByte(0);
         return;
     }
 
-    // TCP_NODELAY
     int one = 1;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
                reinterpret_cast<const char*>(&one), sizeof(one));
-
-    // Non-blocking para connect asíncrono
     setNonBlocking(ISOCK(s));
 
-    // Preparar dirección destino
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family = AF_INET;
-    dest.sin_port = htons(port);
-    dest.sin_addr.s_addr = htonl(ip);
-
-    // Intentar connect
-    int ret = connect(s, reinterpret_cast<struct sockaddr*>(&dest),
-                      sizeof(dest));
-
-    if (ret == 0) {
-        // Conectado inmediatamente (raro con non-blocking, pero posible)
-        c.sock       = ISOCK(s);
-        c.tcpState   = TCP_ESTABLISHED;
-        c.connecting = false;
-    } else {
-#ifdef _WIN32
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) {
-#else
-        if (errno == EINPROGRESS) {
-#endif
-            // Connect en progreso
-            c.sock       = ISOCK(s);
-            c.tcpState   = TCP_SYN_SENT;
-            c.connecting = true;
-        } else {
-            // Error real
+    if (passive) {
+        // Passive: bind to local port, then listen
+        if (localPortReq == 0xFFFF) {
+            // Shouldn't normally happen in passive mode, but handle it
+            localPortReq = 0;
+        }
+        // Allow address reuse (common for servers)
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR,
+                   reinterpret_cast<const char*>(&one), sizeof(one));
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr.sin_port = htons(localPortReq);
+        if (bind(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
             sock_close(s);
             setResultByte(0);
             return;
         }
+        if (listen(s, 1) < 0) {
+            sock_close(s);
+            setResultByte(0);
+            return;
+        }
+        c.sock       = ISOCK(s);
+        c.tcpState   = TCP_LISTEN;
+        c.connecting = false;
+
+        // Read back actual local port
+        socklen_t alen = sizeof(addr);
+        if (getsockname(s, reinterpret_cast<struct sockaddr*>(&addr), &alen) == 0) {
+            c.localPort = ntohs(addr.sin_port);
+        } else {
+            c.localPort = localPortReq;
+        }
+        c.remoteIP   = ip;   // 0 = any; otherwise filter in receiverLoop
+        c.remotePort = remotePort;
+    } else {
+        // Active connect
+        struct sockaddr_in dest;
+        memset(&dest, 0, sizeof(dest));
+        dest.sin_family = AF_INET;
+        dest.sin_port = htons(remotePort);
+        dest.sin_addr.s_addr = htonl(ip);
+        int ret = connect(s, reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
+        if (ret == 0) {
+            c.sock       = ISOCK(s);
+            c.tcpState   = TCP_ESTABLISHED;
+            c.connecting = false;
+        } else {
+#ifdef _WIN32
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK) {
+#else
+            if (errno == EINPROGRESS) {
+#endif
+                c.sock       = ISOCK(s);
+                c.tcpState   = TCP_SYN_SENT;
+                c.connecting = true;
+            } else {
+                sock_close(s);
+                setResultByte(0);
+                return;
+            }
+        }
+        c.remoteIP   = ip;
+        c.remotePort = remotePort;
+
+        // Obtener puerto local asignado
+        struct sockaddr_in local;
+        socklen_t len = sizeof(local);
+        if (getsockname(s, reinterpret_cast<struct sockaddr*>(&local), &len) == 0) {
+            c.localPort = ntohs(local.sin_port);
+        }
     }
 
     c.closeReason = 0;
-    c.remoteIP    = ip;
-    c.remotePort  = port;
-    c.resident    = false;
+    c.resident    = resident;
     {
         std::scoped_lock lock(c.mutex);
         c.recvBuf.clear();
-    }
-
-    // Obtener puerto local asignado
-    struct sockaddr_in local;
-    socklen_t len = sizeof(local);
-    if (getsockname(SOCK(c.sock), reinterpret_cast<struct sockaddr*>(&local),
-                    &len) == 0) {
-        c.localPort = ntohs(local.sin_port);
     }
 
     setResultByte(static_cast<uint8_t>(h));
@@ -844,39 +907,40 @@ void UnapiNet::cmdTcpClose()
 // ============================================================
 //  TCP_STATE (0x07)
 //  Params: handle[1]
-//  Result: state[1] + avail_in[2 LE] + close_reason[1]
+//  Result: state[1] + avail[2 LE] + close_reason[1] +
+//          remote_IP[4] + remote_port[2 LE] + local_port[2 LE]
+//  (12 bytes total — the TSR only reads the first 4 unless HL != 0)
 // ============================================================
 
 void UnapiNet::cmdTcpState()
 {
-    if (paramBuf.empty()) {
-        setError();
-        return;
+    uint8_t res[12] = {TCP_CLOSED, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+
+    if (!paramBuf.empty()) {
+        int h = paramBuf[0];
+        if (h >= 1 && h <= MAX_TCP) {
+            auto& c = tcp[h - 1];
+            uint16_t avail;
+            {
+                std::scoped_lock lock(c.mutex);
+                avail = static_cast<uint16_t>(
+                    std::min(c.recvBuf.size(), static_cast<size_t>(0xFFFF)));
+            }
+            res[0] = static_cast<uint8_t>(c.tcpState);
+            res[1] = static_cast<uint8_t>(avail & 0xFF);
+            res[2] = static_cast<uint8_t>((avail >> 8) & 0xFF);
+            res[3] = c.closeReason;
+            res[4] = static_cast<uint8_t>((c.remoteIP >> 24) & 0xFF);
+            res[5] = static_cast<uint8_t>((c.remoteIP >> 16) & 0xFF);
+            res[6] = static_cast<uint8_t>((c.remoteIP >>  8) & 0xFF);
+            res[7] = static_cast<uint8_t>((c.remoteIP >>  0) & 0xFF);
+            res[8] = static_cast<uint8_t>(c.remotePort & 0xFF);
+            res[9] = static_cast<uint8_t>((c.remotePort >> 8) & 0xFF);
+            res[10] = static_cast<uint8_t>(c.localPort & 0xFF);
+            res[11] = static_cast<uint8_t>((c.localPort >> 8) & 0xFF);
+        }
     }
-
-    int h = paramBuf[0];
-    if (h < 1 || h > MAX_TCP) {
-        // Handle inválido → CLOSED con close_reason
-        uint8_t res[4] = {TCP_CLOSED, 0, 0, 1}; // never used
-        setResult(res, 4);
-        return;
-    }
-
-    auto& c = tcp[h - 1];
-
-    uint16_t avail;
-    {
-        std::scoped_lock lock(c.mutex);
-        avail = static_cast<uint16_t>(
-            std::min(c.recvBuf.size(), static_cast<size_t>(0xFFFF)));
-    }
-
-    uint8_t res[4];
-    res[0] = static_cast<uint8_t>(c.tcpState);
-    res[1] = static_cast<uint8_t>(avail & 0xFF);
-    res[2] = static_cast<uint8_t>((avail >> 8) & 0xFF);
-    res[3] = c.closeReason;
-    setResult(res, 4);
+    setResult(res, 12);
 }
 
 // ============================================================
