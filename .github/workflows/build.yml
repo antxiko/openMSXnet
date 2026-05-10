@@ -3,6 +3,7 @@ name: build
 on:
   push:
     branches: [master]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -266,3 +267,48 @@ jobs:
           name: openmsx-windows-x86_64
           path: out/openmsx-windows/
           if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [msx-tsr, linux, macos, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Pack platform folders into zips
+        working-directory: artifacts
+        run: |
+          for d in openmsx-linux-x86_64 openmsx-macos-arm64 openmsx-windows-x86_64; do
+            (cd "$d" && zip -r "../${d}.zip" .)
+          done
+          cp UNAPINET.COM/unapinet.com ../UNAPINET.COM
+          ls -la *.zip ../UNAPINET.COM
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; uploading assets (overwrite)."
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+              UNAPINET.COM \
+              artifacts/openmsx-windows-x86_64.zip \
+              artifacts/openmsx-linux-x86_64.zip \
+              artifacts/openmsx-macos-arm64.zip
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --generate-notes \
+              UNAPINET.COM \
+              artifacts/openmsx-windows-x86_64.zip \
+              artifacts/openmsx-linux-x86_64.zip \
+              artifacts/openmsx-macos-arm64.zip
+          fi
