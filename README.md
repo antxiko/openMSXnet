@@ -1,8 +1,14 @@
 # openMSXnet
 
+[![build](https://github.com/antxiko/openMSXnet/actions/workflows/build.yml/badge.svg)](https://github.com/antxiko/openMSXnet/actions/workflows/build.yml)
+
 An MSX TCP/IP UNAPI implementation that exposes the host operating system's
 network stack to MSX software running under the [openMSX](https://openmsx.org/)
 emulator.
+
+> **Looking to install and run, not build from source?**
+> See **[docs/USAGE.md](docs/USAGE.md)** for step-by-step instructions on
+> Windows, Linux and macOS, plus where to download pre-built binaries.
 
 The implementation consists of two cooperating components:
 
@@ -87,6 +93,18 @@ msx/
 ```
 
 ## Building
+
+The project ships with a GitHub Actions workflow
+([`.github/workflows/build.yml`](.github/workflows/build.yml)) that builds
+openMSX with the UnapiNet extension on Windows, Linux and macOS, and
+assembles `UNAPINET.COM` with Nestor80. Pre-built artifacts are attached
+to every run on the [Actions tab](../../actions).
+
+To reproduce a build locally, run [`ci/setup-openmsx.sh`](ci/setup-openmsx.sh).
+The script clones openMSX at `RELEASE_21_0`, drops the extension into
+`src/unapinet/`, registers the device class in `DeviceFactory.cc` and
+applies the platform patches listed below. After it finishes, run `make`
+inside `openMSX/` with the appropriate environment for your OS.
 
 ### Prerequisites
 

@@ -1,0 +1,238 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  msx-tsr:
+    name: MSX TSR (UNAPINET.COM)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Nestor80
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force tools | Out-Null
+          gh release download --repo Konamiman/Nestor80 --pattern '*.zip' --dir tools --skip-existing
+          $zip = Get-ChildItem tools -Filter '*.zip' | Select-Object -First 1
+          Expand-Archive -Path $zip.FullName -DestinationPath tools/n80 -Force
+          Get-ChildItem tools/n80 -Recurse -Filter 'N80.exe' | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+
+      - name: Assemble UNAPINET.COM
+        shell: pwsh
+        run: |
+          $n80 = Get-ChildItem tools/n80 -Recurse -Filter 'N80.exe' | Select-Object -First 1
+          if (-not $n80) { throw "N80.exe not found inside Nestor80 release" }
+          & $n80.FullName msx/unapinet.asm msx/unapinet.com --direct-output-write
+          if (-not (Test-Path msx/unapinet.com)) { throw "Assembly produced no output" }
+          Get-Item msx/unapinet.com | Format-List Name, Length, LastWriteTime
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UNAPINET.COM
+          path: msx/unapinet.com
+          if-no-files-found: error
+
+  linux:
+    name: openMSX Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 \
+            libsdl2-dev libsdl2-ttf-dev libfreetype-dev libglew-dev \
+            libpng-dev libxml2-dev tcl-dev libogg-dev libvorbis-dev \
+            libtheora-dev libasound2-dev libjack-jackd2-dev
+
+      - name: Stage openMSX source tree
+        run: bash ci/setup-openmsx.sh
+
+      - name: Build openMSX
+        working-directory: openMSX
+        run: make -j$(nproc) OPENMSX_TARGET_OS=linux
+
+      - name: Locate binary
+        id: locate
+        run: |
+          BIN=$(find openMSX/derived -type f -name openmsx -perm -111 | head -n1)
+          if [ -z "$BIN" ]; then
+            echo "openMSX binary not found"
+            find openMSX/derived -maxdepth 4 -type f
+            exit 1
+          fi
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+          echo "Built: $BIN"
+          file "$BIN"
+
+      - name: Stage release tree
+        run: |
+          mkdir -p out/openmsx-linux/share
+          cp "${{ steps.locate.outputs.bin }}" out/openmsx-linux/openmsx
+          cp -r openMSX/share/extensions out/openmsx-linux/share/
+          cp README.md out/openmsx-linux/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openmsx-linux-x86_64
+          path: out/openmsx-linux/
+          if-no-files-found: error
+
+  macos:
+    name: openMSX macOS (Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          brew update
+          brew install sdl2 sdl2_ttf freetype glew libpng libxml2 \
+                       tcl-tk libogg libvorbis libtheora pkg-config
+
+      - name: Configure Homebrew tcl-tk paths
+        run: |
+          BREW="$(brew --prefix)"
+          {
+            echo "PATH=${BREW}/opt/tcl-tk/bin:${BREW}/opt/libxml2/bin:${PATH}"
+            echo "PKG_CONFIG_PATH=${BREW}/opt/tcl-tk/lib/pkgconfig:${BREW}/opt/libxml2/lib/pkgconfig"
+            echo "LDFLAGS=-L${BREW}/opt/tcl-tk/lib -L${BREW}/opt/libxml2/lib"
+            echo "CPPFLAGS=-I${BREW}/opt/tcl-tk/include -I${BREW}/opt/libxml2/include"
+            echo "TCL_CONFIG=${BREW}/opt/tcl-tk/lib"
+          } >> "$GITHUB_ENV"
+
+      - name: Stage openMSX source tree
+        run: bash ci/setup-openmsx.sh
+
+      - name: Build openMSX
+        working-directory: openMSX
+        run: make -j$(sysctl -n hw.ncpu) OPENMSX_TARGET_OS=darwin
+
+      - name: Locate binary
+        id: locate
+        run: |
+          BIN=$(find openMSX/derived -type f -name openmsx -perm -111 | head -n1)
+          if [ -z "$BIN" ]; then
+            echo "openMSX binary not found"
+            find openMSX/derived -maxdepth 4 -type f
+            exit 1
+          fi
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+          file "$BIN"
+
+      - name: Stage release tree
+        run: |
+          mkdir -p out/openmsx-macos/share
+          cp "${{ steps.locate.outputs.bin }}" out/openmsx-macos/openmsx
+          cp -r openMSX/share/extensions out/openmsx-macos/share/
+          cp README.md out/openmsx-macos/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openmsx-macos-arm64
+          path: out/openmsx-macos/
+          if-no-files-found: error
+
+  windows:
+    name: openMSX Windows (x86_64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            python
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_ttf
+            mingw-w64-x86_64-freetype
+            mingw-w64-x86_64-glew
+            mingw-w64-x86_64-libpng
+            mingw-w64-x86_64-libxml2
+            mingw-w64-x86_64-tcl
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-libogg
+            mingw-w64-x86_64-libvorbis
+            mingw-w64-x86_64-libtheora
+
+      - name: Stage openMSX source tree
+        run: bash ci/setup-openmsx.sh
+
+      - name: Build openMSX
+        working-directory: openMSX
+        env:
+          PYTHON: /mingw64/bin/python3
+          MSYSCON: 'yes'
+          SHELL: /usr/bin/bash
+          TCL_CONFIG: /mingw64/lib
+        run: make -j$(nproc) OPENMSX_TARGET_OS=mingw32
+
+      - name: Locate binary
+        id: locate
+        run: |
+          BIN=$(find openMSX/derived -type f -name openmsx.exe | head -n1)
+          if [ -z "$BIN" ]; then
+            echo "openmsx.exe not found"
+            find openMSX/derived -maxdepth 4 -type f
+            exit 1
+          fi
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+          file "$BIN"
+
+      - name: Bundle runtime DLLs
+        run: |
+          BIN="${{ steps.locate.outputs.bin }}"
+          BIN_DIR="$(dirname "$BIN")"
+          # ntldd would be ideal but isn't always present; fall back to objdump.
+          mapfile -t deps < <(objdump -p "$BIN" | awk '/DLL Name:/ {print $3}')
+          for d in "${deps[@]}"; do
+            src="/mingw64/bin/$d"
+            if [ -f "$src" ]; then
+              cp -v "$src" "$BIN_DIR/"
+            fi
+          done
+          # Recurse one level for transitive mingw64 deps.
+          for f in "$BIN_DIR"/*.dll; do
+            mapfile -t deps2 < <(objdump -p "$f" | awk '/DLL Name:/ {print $3}')
+            for d in "${deps2[@]}"; do
+              src="/mingw64/bin/$d"
+              if [ -f "$src" ] && [ ! -f "$BIN_DIR/$d" ]; then
+                cp -v "$src" "$BIN_DIR/"
+              fi
+            done
+          done
+
+      - name: Stage release tree
+        run: |
+          BIN="${{ steps.locate.outputs.bin }}"
+          BIN_DIR="$(dirname "$BIN")"
+          mkdir -p out/openmsx-windows/share
+          cp "$BIN_DIR"/*.exe "$BIN_DIR"/*.dll out/openmsx-windows/
+          cp -r openMSX/share/extensions out/openmsx-windows/share/
+          cp README.md out/openmsx-windows/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openmsx-windows-x86_64
+          path: out/openmsx-windows/
+          if-no-files-found: error
