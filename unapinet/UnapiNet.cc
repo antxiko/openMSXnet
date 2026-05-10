@@ -268,7 +268,7 @@ uint32_t UnapiNet::getHostLocalIP()
     if (connect(s, reinterpret_cast<struct sockaddr*>(&remote),
                 sizeof(remote)) == 0) {
         struct sockaddr_in local;
-        socklen_t len = sizeof(local);
+        ::socklen_t len = sizeof(local);
         if (getsockname(s, reinterpret_cast<struct sockaddr*>(&local),
                         &len) == 0) {
             ip = ntohl(local.sin_addr.s_addr);
@@ -309,7 +309,7 @@ void UnapiNet::receiverLoop()
                     continue;
                 }
                 struct sockaddr_in peer;
-                socklen_t plen = sizeof(peer);
+                ::socklen_t plen = sizeof(peer);
                 SOCKET a = accept(sd, reinterpret_cast<struct sockaddr*>(&peer), &plen);
                 if (a == OPENMSX_INVALID_SOCKET) continue;
                 uint32_t peerIP = ntohl(peer.sin_addr.s_addr);
@@ -351,7 +351,7 @@ void UnapiNet::receiverLoop()
                         c.sock = INVALID_SOCK;
                     } else if (FD_ISSET(sd, &wfds)) {
                         int err = 0;
-                        socklen_t elen = sizeof(err);
+                        ::socklen_t elen = sizeof(err);
                         getsockopt(sd, SOL_SOCKET, SO_ERROR,
                                    reinterpret_cast<char*>(&err), &elen);
                         if (err == 0) {
@@ -419,7 +419,7 @@ void UnapiNet::receiverLoop()
 
             char buf[2048];
             struct sockaddr_in src;
-            socklen_t slen = sizeof(src);
+            ::socklen_t slen = sizeof(src);
             int n = recvfrom(sd, buf, sizeof(buf), 0,
                              reinterpret_cast<struct sockaddr*>(&src), &slen);
             if (n <= 0) continue;
@@ -690,7 +690,7 @@ void UnapiNet::cmdTcpOpen()
         c.connecting = false;
 
         // Read back actual local port
-        socklen_t alen = sizeof(addr);
+        ::socklen_t alen = sizeof(addr);
         if (getsockname(s, reinterpret_cast<struct sockaddr*>(&addr), &alen) == 0) {
             c.localPort = ntohs(addr.sin_port);
         } else {
@@ -731,7 +731,7 @@ void UnapiNet::cmdTcpOpen()
 
         // Obtener puerto local asignado
         struct sockaddr_in local;
-        socklen_t len = sizeof(local);
+        ::socklen_t len = sizeof(local);
         if (getsockname(s, reinterpret_cast<struct sockaddr*>(&local), &len) == 0) {
             c.localPort = ntohs(local.sin_port);
         }
@@ -1075,7 +1075,7 @@ void UnapiNet::cmdUdpOpen()
     }
 
     // Read back actual local port
-    socklen_t alen = sizeof(addr);
+    ::socklen_t alen = sizeof(addr);
     if (getsockname(s, reinterpret_cast<struct sockaddr*>(&addr), &alen) == 0) {
         u.localPort = ntohs(addr.sin_port);
     } else {

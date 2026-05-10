@@ -16,22 +16,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Nestor80
+      - name: Download Nestor80 (self-contained win-x64)
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force tools | Out-Null
-          gh release download --repo Konamiman/Nestor80 --pattern '*.zip' --dir tools --skip-existing
-          $zip = Get-ChildItem tools -Filter '*.zip' | Select-Object -First 1
+          gh release download --repo Konamiman/Nestor80 `
+            --pattern 'N80_*_SelfContained_win-x64.zip' `
+            --dir tools --skip-existing
+          $zip = Get-ChildItem tools -Filter 'N80_*_SelfContained_win-x64.zip' | Select-Object -First 1
+          if (-not $zip) { throw "Could not locate Nestor80 self-contained win-x64 zip" }
+          Write-Host "Extracting $($zip.Name) ($($zip.Length) bytes)"
           Expand-Archive -Path $zip.FullName -DestinationPath tools/n80 -Force
-          Get-ChildItem tools/n80 -Recurse -Filter 'N80.exe' | ForEach-Object { Write-Host "Found: $($_.FullName)" }
 
       - name: Assemble UNAPINET.COM
         shell: pwsh
         run: |
           $n80 = Get-ChildItem tools/n80 -Recurse -Filter 'N80.exe' | Select-Object -First 1
-          if (-not $n80) { throw "N80.exe not found inside Nestor80 release" }
+          if (-not $n80) {
+            Write-Host "Contents of tools/n80:"
+            Get-ChildItem tools/n80 -Recurse | Format-Table FullName,Length
+            throw "N80.exe not found inside Nestor80 release"
+          }
+          Write-Host "Using assembler: $($n80.FullName)"
           & $n80.FullName msx/unapinet.asm msx/unapinet.com --direct-output-write
           if (-not (Test-Path msx/unapinet.com)) { throw "Assembly produced no output" }
           Get-Item msx/unapinet.com | Format-List Name, Length, LastWriteTime
@@ -63,6 +71,13 @@ jobs:
       - name: Build openMSX
         working-directory: openMSX
         run: make -j$(nproc) OPENMSX_TARGET_OS=linux
+
+      - name: Dump probe.log on failure
+        if: failure()
+        run: |
+          for f in openMSX/derived/*/config/probe.log; do
+            [ -f "$f" ] && { echo "=== $f ==="; cat "$f"; }
+          done
 
       - name: Locate binary
         id: locate
@@ -100,7 +115,7 @@ jobs:
         run: |
           brew update
           brew install sdl2 sdl2_ttf freetype glew libpng libxml2 \
-                       tcl-tk libogg libvorbis libtheora pkg-config
+                       tcl-tk libogg libvorbis theora pkg-config
 
       - name: Configure Homebrew tcl-tk paths
         run: |
@@ -119,6 +134,13 @@ jobs:
       - name: Build openMSX
         working-directory: openMSX
         run: make -j$(sysctl -n hw.ncpu) OPENMSX_TARGET_OS=darwin
+
+      - name: Dump probe.log on failure
+        if: failure()
+        run: |
+          for f in openMSX/derived/*/config/probe.log; do
+            [ -f "$f" ] && { echo "=== $f ==="; cat "$f"; }
+          done
 
       - name: Locate binary
         id: locate
@@ -162,6 +184,7 @@ jobs:
             git
             make
             python
+            mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-SDL2
             mingw-w64-x86_64-SDL2_ttf
@@ -186,6 +209,13 @@ jobs:
           SHELL: /usr/bin/bash
           TCL_CONFIG: /mingw64/lib
         run: make -j$(nproc) OPENMSX_TARGET_OS=mingw32
+
+      - name: Dump probe.log on failure
+        if: failure()
+        run: |
+          for f in openMSX/derived/*/config/probe.log; do
+            [ -f "$f" ] && { echo "=== $f ==="; cat "$f"; }
+          done
 
       - name: Locate binary
         id: locate
