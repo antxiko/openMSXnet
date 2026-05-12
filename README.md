@@ -1,5 +1,8 @@
 # openMSXnet
 
+First of all, many many thanks to @mcolom, because the idea of this project born thanks to him!
+Thanks a lot Tiburoncio!
+
 [![build](https://github.com/antxiko/openMSXnet/actions/workflows/build.yml/badge.svg)](https://github.com/antxiko/openMSXnet/actions/workflows/build.yml)
 
 An MSX TCP/IP UNAPI implementation that exposes the host operating system's
