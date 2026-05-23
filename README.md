@@ -34,7 +34,7 @@ MSX program (hget, telnet, sntp, ...)
         ▼
 UNAPINET.COM    (Z80 TSR in mapper segment)
         │
-        │  I/O ports 7Eh / 7Fh
+        │  I/O ports C0h / C1h
         ▼
 UnapiNet device (C++, inside openMSX)
         │
@@ -87,7 +87,7 @@ Verified against:
 unapinet/
   UnapiNet.hh           C++ device class declaration
   UnapiNet.cc           C++ device implementation
-  unapinet.xml          openMSX device descriptor (claims I/O ports 7Eh-7Fh)
+  unapinet.xml          openMSX device descriptor (claims I/O ports C0h-C1h, same range as Obsonet)
 
 msx/
   unapinet.asm          Z80 TSR (Nestor80 syntax)
@@ -220,25 +220,33 @@ through `EXTBIO` and route its calls through the bridge.
 All communication between the Z80 TSR and the C++ device flows through two
 I/O ports.
 
+> **Choice of port range.** UnapiNet uses ports `C0h-C1h`, the same range
+> as the [Obsonet](https://github.com/Konamiman/MSX/tree/master/SRC/NETWORK/Obsonet)
+> Ethernet card. Both are UNAPI Ethernet bridges so loading them together
+> in openMSX would conflict, but you would never want to: openMSXnet
+> *is* the in-emulator equivalent of Obsonet. The pre-v0.9.1 builds used
+> `7Eh-7Fh`, which clashed with **MoonSound** (Yamaha OPL4) — moving to
+> the Obsonet range avoids that and keeps a sound expansion compatible.
+
 | Port | Write | Read |
 |------|-------|------|
-| 7Eh  | Command byte; triggers execution | Status (00=OK, 01=ERR, 02=DATA available) |
-| 7Fh  | Parameter byte; appended to a per-command buffer | Result byte; auto-advances on each read |
+| C0h  | Command byte; triggers execution | Status (00=OK, 01=ERR, 02=DATA available) |
+| C1h  | Parameter byte; appended to a per-command buffer | Result byte; auto-advances on each read |
 
-The MSX appends parameter bytes to port 7Fh, then writes a command byte
-to port 7Eh. The device processes the command synchronously (DNS is
+The MSX appends parameter bytes to port C1h, then writes a command byte
+to port C0h. The device processes the command synchronously (DNS is
 serviced asynchronously through a worker thread but its dispatch is
 non-blocking), populates the result buffer, and signals `DATA available`
-on port 7Eh. The MSX then reads the result bytes sequentially from port
-7Fh.
+on port C0h. The MSX then reads the result bytes sequentially from port
+C1h.
 
-Writing to port 7Fh while a previous result is still pending discards
+Writing to port C1h while a previous result is still pending discards
 the stale result. This avoids deadlocks if the MSX side fails to drain
 all bytes from a previous call.
 
 ### Bridge command set
 
-| Cmd  | Mnemonic       | Parameters (port 7Fh)                | Result (port 7Fh)                   |
+| Cmd  | Mnemonic       | Parameters (port C1h)                | Result (port C1h)                   |
 |------|----------------|--------------------------------------|-------------------------------------|
 | 00h  | `PING`         | -                                    | 1 byte: ABh                         |
 | 01h  | `DNS_QUERY`    | hostname + 00h                       | 1 byte status [+ 4 bytes IP]        |
