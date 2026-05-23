@@ -11,8 +11,8 @@ _CONIN:  equ    01h
 EXTBIO:  equ    0FFCAh
 ARG:     equ    0F847h
 
-IO_CMD:  equ    0Bh
-IO_DATA: equ    0Ch
+IO_CMD:  equ    28h
+IO_DATA: equ    29h
 
         org     100h
 

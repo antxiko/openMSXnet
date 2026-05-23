@@ -6,12 +6,12 @@
     <manufacturer>openMSXnet</manufacturer>
     <code/>
     <release_year>2026</release_year>
-    <description>UNAPI TCP/IP bridge. Provides real network access to MSX via I/O ports 0x0B-0x0C (per Grauw's MSX I/O port reference, this range is reserved/free and clashes with no known MSX hardware).</description>
+    <description>UNAPI TCP/IP bridge. Provides real network access to MSX via I/O ports 0x28-0x29 (same range as the DenYoNet Ethernet card; both are UNAPI Ethernet bridges and are not loaded together).</description>
     <type>network</type>
   </info>
   <devices>
     <UnapiNet id="UnapiNet">
-      <io base="0x0B" num="2"/>
+      <io base="0x28" num="2"/>
     </UnapiNet>
   </devices>
 </msxconfig>

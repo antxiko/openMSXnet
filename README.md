@@ -34,7 +34,7 @@ MSX program (hget, telnet, sntp, ...)
         ▼
 UNAPINET.COM    (Z80 TSR in mapper segment)
         │
-        │  I/O ports 0Bh / 0Ch
+        │  I/O ports 28h / 29h
         ▼
 UnapiNet device (C++, inside openMSX)
         │
@@ -87,7 +87,7 @@ Verified against:
 unapinet/
   UnapiNet.hh           C++ device class declaration
   UnapiNet.cc           C++ device implementation
-  unapinet.xml          openMSX device descriptor (claims I/O ports 0Bh-0Ch — free per Grauw)
+  unapinet.xml          openMSX device descriptor (claims I/O ports 28h-29h, same range as DenYoNet)
 
 msx/
   unapinet.asm          Z80 TSR (Nestor80 syntax)
@@ -220,33 +220,33 @@ through `EXTBIO` and route its calls through the bridge.
 All communication between the Z80 TSR and the C++ device flows through two
 I/O ports.
 
-> **Choice of port range.** UnapiNet uses ports `0Bh-0Ch`, listed as
-> free in [Grauw's MSX I/O port reference](https://map.grauw.nl/resources/msx_io_ports.php).
-> Earlier iterations used `7Eh-7Fh` (clashed with **MoonSound**, Yamaha
-> OPL4) and `C0h-C1h` (same range as the Obsonet Ethernet card, but
-> also dynamically claimed by the **DalSoRi R2** OPL4 cart when its
-> software-controlled register window is enabled). `0Bh-0Ch` clears
-> both conflicts.
+> **Choice of port range.** UnapiNet uses ports `28h-29h`, the same
+> range as the DenYoNet Ethernet card. Both are UNAPI Ethernet
+> bridges and are never loaded together. Earlier iterations used
+> `7Eh-7Fh` (clashed with **MoonSound** — Yamaha OPL4) and `C0h-C1h`
+> (same range as the Obsonet Ethernet card but also dynamically
+> claimed by the **DalSoRi R2** OPL4 cart when its software-controlled
+> register window is enabled).
 
 | Port | Write | Read |
 |------|-------|------|
-| 0Bh  | Command byte; triggers execution | Status (00=OK, 01=ERR, 02=DATA available) |
-| 0Ch  | Parameter byte; appended to a per-command buffer | Result byte; auto-advances on each read |
+| 28h  | Command byte; triggers execution | Status (00=OK, 01=ERR, 02=DATA available) |
+| 29h  | Parameter byte; appended to a per-command buffer | Result byte; auto-advances on each read |
 
-The MSX appends parameter bytes to port 0Ch, then writes a command byte
-to port 0Bh. The device processes the command synchronously (DNS is
+The MSX appends parameter bytes to port 29h, then writes a command byte
+to port 28h. The device processes the command synchronously (DNS is
 serviced asynchronously through a worker thread but its dispatch is
 non-blocking), populates the result buffer, and signals `DATA available`
-on port 0Bh. The MSX then reads the result bytes sequentially from port
-0Ch.
+on port 28h. The MSX then reads the result bytes sequentially from port
+29h.
 
-Writing to port 0Ch while a previous result is still pending discards
+Writing to port 29h while a previous result is still pending discards
 the stale result. This avoids deadlocks if the MSX side fails to drain
 all bytes from a previous call.
 
 ### Bridge command set
 
-| Cmd  | Mnemonic       | Parameters (port 0Ch)                | Result (port 0Ch)                   |
+| Cmd  | Mnemonic       | Parameters (port 29h)                | Result (port 29h)                   |
 |------|----------------|--------------------------------------|-------------------------------------|
 | 00h  | `PING`         | -                                    | 1 byte: ABh                         |
 | 01h  | `DNS_QUERY`    | hostname + 00h                       | 1 byte status [+ 4 bytes IP]        |

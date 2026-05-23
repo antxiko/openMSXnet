@@ -111,10 +111,10 @@ byte UnapiNet::readIO(uint16_t port, EmuTime /*time*/)
 {
     switch (port & 0xFF) {
 
-    case 0x0B: // registro de status
+    case 0x28: // registro de status
         return statusReg;
 
-    case 0x0C: // registro de datos
+    case 0x29: // registro de datos
         if (state == State::RESULT_READY && resultPos < resultBuf.size()) {
             uint8_t b = resultBuf[resultPos++];
             if (resultPos >= resultBuf.size()) {
@@ -138,11 +138,11 @@ void UnapiNet::writeIO(uint16_t port, byte value, EmuTime /*time*/)
 {
     switch (port & 0xFF) {
 
-    case 0x0B: // comando
+    case 0x28: // comando
         processCmd(value);
         break;
 
-    case 0x0C: // parámetro (acumular)
+    case 0x29: // parámetro (acumular)
         // Si hay resultado pendiente sin leer, descartarlo
         // para que los nuevos parámetros se acepten
         if (state == State::RESULT_READY) {

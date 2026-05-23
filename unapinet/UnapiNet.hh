@@ -14,8 +14,8 @@
 // ============================================================
 //  UnapiNet  –  openMSX Extension  (Phase 2)
 //
-//  Puertos I/O 0x0B (cmd/status) y 0x0C (data). Rango libre según el
-//  mapa de I/O ports de Grauw (map.grauw.nl/resources/msx_io_ports.php).
+//  Puertos I/O 0x28 (cmd/status) y 0x29 (data). Mismo rango que el
+//  DenYoNet — ambos son bridges UNAPI Ethernet y no coexisten.
 //  Bridge entre MSX y sockets BSD del host.
 //  No incluimos Socket.hh aquí para evitar conflicto con
 //  la macro "interface" de windows.h.
@@ -42,10 +42,10 @@ private:
     State    state;
     uint8_t  statusReg;
 
-    // Buffer de parámetros (escritos a 0x0C antes del comando)
+    // Buffer de parámetros (escritos a 0x29 antes del comando)
     std::vector<uint8_t> paramBuf;
 
-    // Buffer de resultado (leído desde 0x0C tras comando)
+    // Buffer de resultado (leído desde 0x29 tras comando)
     std::vector<uint8_t> resultBuf;
     size_t resultPos;
 
@@ -62,7 +62,7 @@ private:
     static constexpr uint8_t CMD_UDP_OPEN   = 0x09;
     static constexpr uint8_t CMD_UDP_CLOSE  = 0x0A;
     static constexpr uint8_t CMD_UDP_STATE  = 0x0B;
-    static constexpr uint8_t CMD_UDP_SEND   = 0x0C;
+    static constexpr uint8_t CMD_UDP_SEND   = 0x29;
     static constexpr uint8_t CMD_GET_LOCALIP = 0x0D;
     static constexpr uint8_t CMD_NET_STATE  = 0x0E;
     static constexpr uint8_t CMD_UDP_RECV   = 0x0F;
