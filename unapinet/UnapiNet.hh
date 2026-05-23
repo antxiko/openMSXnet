@@ -14,8 +14,8 @@
 // ============================================================
 //  UnapiNet  –  openMSX Extension  (Phase 2)
 //
-//  Puertos I/O 0xC0 (cmd/status) y 0xC1 (data). Mismo rango que el
-//  Obsonet — ambos son bridges UNAPI Ethernet y no coexisten.
+//  Puertos I/O 0x0B (cmd/status) y 0x0C (data). Rango libre según el
+//  mapa de I/O ports de Grauw (map.grauw.nl/resources/msx_io_ports.php).
 //  Bridge entre MSX y sockets BSD del host.
 //  No incluimos Socket.hh aquí para evitar conflicto con
 //  la macro "interface" de windows.h.
@@ -42,10 +42,10 @@ private:
     State    state;
     uint8_t  statusReg;
 
-    // Buffer de parámetros (escritos a 0xC1 antes del comando)
+    // Buffer de parámetros (escritos a 0x0C antes del comando)
     std::vector<uint8_t> paramBuf;
 
-    // Buffer de resultado (leído desde 0xC1 tras comando)
+    // Buffer de resultado (leído desde 0x0C tras comando)
     std::vector<uint8_t> resultBuf;
     size_t resultPos;
 

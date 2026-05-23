@@ -4,11 +4,12 @@
 ;
 ; Se instala en un segmento del memory mapper.
 ; Requiere RAM helper previamente instalado (RAMHELPR.COM).
-; Despacha funciones UNAPI TCP/IP via puertos I/O C0h/C1h
-; (mismo rango que el Obsonet — ambos son bridges UNAPI Ethernet, no
-;  se cargan a la vez. Se eligió este rango para evitar el choque con
-;  MoonSound, que usa 7Eh/7Fh.) Comunica con la extensión C++ UnapiNet
-;  de openMSX.
+; Despacha funciones UNAPI TCP/IP via puertos I/O 0Bh/0Ch
+; (rango libre según el mapa de I/O ports de Grauw —
+;  map.grauw.nl/resources/msx_io_ports.php). Iteraciones previas
+;  usaron 7Eh/7Fh (choque con MoonSound) y C0h/C1h (choque con
+;  DalSoRi R2 cuando habilita sus puertos dinámicos). Comunica con
+;  la extensión C++ UnapiNet de openMSX.
 ;
 ; Compilar: N80 unapinet.asm unapinet.com --direct-output-write
 ;============================================================
@@ -35,8 +36,8 @@ MAX_FN:         equ     18
 MAX_IMPFN:      equ     0
 
 ; --- I/O ports (must match unapinet.xml)
-IO_CMD:         equ     0C0h    ; W=command, R=status
-IO_DATA:        equ     0C1h    ; W=param,   R=result
+IO_CMD:         equ     0Bh     ; W=command, R=status
+IO_DATA:        equ     0Ch     ; W=param,   R=result
 
 ; --- Bridge commands
 CMD_PING:       equ     00h
