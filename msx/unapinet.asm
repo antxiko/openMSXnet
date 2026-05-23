@@ -27,7 +27,7 @@ ARG:    equ     0F847h
 ; --- API / Implementation version
 API_V_P:        equ     1
 API_V_S:        equ     1
-ROM_V_P:        equ     0
+ROM_V_P:        equ     1
 ROM_V_S:        equ     1
 
 ; --- Max function number
@@ -384,7 +384,7 @@ _PUT_P1:
 ;--- Strings
 
 WELCOME_S:
-        db      "UNAPINET v1.0 - UNAPI TCP/IP bridge for openMSX",13,10
+        db      "UNAPINET v1.1 - UNAPI TCP/IP bridge for openMSX",13,10
         db      "(c) 2026 openMSXnet project",13,10
         db      13,10,"$"
 
