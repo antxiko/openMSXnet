@@ -120,12 +120,12 @@ import pathlib
 p = pathlib.Path("build/3rdparty.mk")
 s = p.read_text()
 # -std=gnu11: pkg-config 0.29.2 glib uses `bool` as variable name; GCC 16 (C23) treats it as keyword.
-# -Wno-error: glib's autoconf auto-enables -Werror=format / -Werror=incompatible-pointer-types
-#             based on compiler-feature detection. On 64-bit mingw the bundled glib hits both
-#             ('%u' for size_t, _wstat64i32 pointer type) — turn off -Werror to demote to warnings.
+# -w:         suppress ALL warnings — glib's autoconf appends its own -Werror=format etc AFTER
+#             our CFLAGS so -Wno-error gets overridden. Using -w means no warning is emitted in
+#             the first place, so -Werror has nothing to convert to an error. Brutal but works.
 s = s.replace(
     'CFLAGS="-Wno-error=int-conversion"',
-    'CFLAGS="-Wno-error=int-conversion -std=gnu11 -Wno-error"')
+    'CFLAGS="-Wno-error=int-conversion -std=gnu11 -w"')
 p.write_text(s)
 PY
 fi
