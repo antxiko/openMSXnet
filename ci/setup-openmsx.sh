@@ -119,9 +119,13 @@ PY
 import pathlib
 p = pathlib.Path("build/3rdparty.mk")
 s = p.read_text()
+# -std=gnu11: pkg-config 0.29.2 glib uses `bool` as variable name; GCC 16 (C23) treats it as keyword.
+# -Wno-error: glib's autoconf auto-enables -Werror=format / -Werror=incompatible-pointer-types
+#             based on compiler-feature detection. On 64-bit mingw the bundled glib hits both
+#             ('%u' for size_t, _wstat64i32 pointer type) — turn off -Werror to demote to warnings.
 s = s.replace(
     'CFLAGS="-Wno-error=int-conversion"',
-    'CFLAGS="-Wno-error=int-conversion -std=gnu11"')
+    'CFLAGS="-Wno-error=int-conversion -std=gnu11 -Wno-error"')
 p.write_text(s)
 PY
 fi
