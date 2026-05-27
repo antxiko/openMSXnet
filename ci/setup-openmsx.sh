@@ -109,6 +109,21 @@ s = s.replace(
     "-L/mingw/lib -L/mingw/lib/w32api -lws2_32 -lwsock32 -liphlpapi -lwinmm")
 p.write_text(s)
 PY
+    # Force C11 for the pkg-config 0.29.2 bundled glib build. GCC 16+
+    # defaults to C23 where `bool` is a keyword, but the upstream
+    # pkg-config tarball that openMSX downloads pre-dates C23 and uses
+    # `bool` as a variable name. 3rdparty.mk hardcodes CFLAGS at the
+    # pkg-config configure call, so env CFLAGS does not propagate —
+    # extend the hardcoded flags here.
+    python3 - <<'PY'
+import pathlib
+p = pathlib.Path("build/3rdparty.mk")
+s = p.read_text()
+s = s.replace(
+    'CFLAGS="-Wno-error=int-conversion"',
+    'CFLAGS="-Wno-error=int-conversion -std=gnu11"')
+p.write_text(s)
+PY
 fi
 
 echo "openMSX prepared at: ${OPENMSX_DIR}"
