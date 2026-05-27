@@ -185,42 +185,31 @@ jobs:
             git
             make
             python
-            tar
-            patch
-            autoconf
-            automake
-            libtool
-            mingw-w64-x86_64-gcc
             mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-python
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-tools-git
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_ttf
+            mingw-w64-x86_64-freetype
+            mingw-w64-x86_64-glew
+            mingw-w64-x86_64-libpng
+            mingw-w64-x86_64-libxml2
+            mingw-w64-x86_64-tcl
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-libogg
+            mingw-w64-x86_64-libvorbis
+            mingw-w64-x86_64-libtheora
 
       - name: Stage openMSX source tree
         run: bash ci/setup-openmsx.sh
 
-      - name: Cache 3rdparty downloads + builds
-        uses: actions/cache@v4
-        with:
-          path: |
-            openMSX/derived/3rdparty
-          key: openmsx-3rdparty-win-${{ hashFiles('openMSX/build/3rdparty_libraries.py', 'openMSX/build/3rdparty.mk', 'openMSX/build/main.mk') }}
-          restore-keys: |
-            openmsx-3rdparty-win-
-
-      - name: Build static binary distribution
+      - name: Build openMSX
         working-directory: openMSX
         env:
           PYTHON: /mingw64/bin/python3
           MSYSCON: 'yes'
           SHELL: /usr/bin/bash
-        run: |
-          # staticbindist downloads + statically compiles all 3rdparty deps
-          # (SDL2, Tcl, libxml2, freetype, glew, libpng, ogg, vorbis, theora,
-          # zlib), then links openmsx.exe against them so the resulting
-          # binary has no runtime DLL dependencies beyond the Windows
-          # baseline. Mirrors what the official openMSX team ships.
-          make -j$(nproc) staticbindist OPENMSX_TARGET_CPU=x86_64 OPENMSX_TARGET_OS=mingw-w64
+          TCL_CONFIG: /mingw64/lib
+        run: make -j$(nproc) OPENMSX_TARGET_OS=mingw32
 
       - name: Dump probe.log on failure
         if: failure()
@@ -229,24 +218,56 @@ jobs:
             [ -f "$f" ] && { echo "=== $f ==="; cat "$f"; }
           done
 
-      - name: Stage release tree
+      - name: Locate binary
+        id: locate
         run: |
-          # bindist install root has openmsx.exe + share/ + doc/ for Windows
-          INSTALL=$(find openMSX/derived -path "*/bindist/install" -type d | head -n1)
-          if [ -z "$INSTALL" ]; then
-            echo "bindist install dir not found"
-            find openMSX/derived -maxdepth 4 -type d
+          BIN=$(find openMSX/derived -type f -name openmsx.exe | head -n1)
+          if [ -z "$BIN" ]; then
+            echo "openmsx.exe not found"
+            find openMSX/derived -maxdepth 4 -type f
             exit 1
           fi
-          echo "install root: $INSTALL"
-          ls -la "$INSTALL"
-          mkdir -p out/openmsx-windows
-          cp -r "$INSTALL"/. out/openmsx-windows/
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+          file "$BIN"
+
+      - name: Bundle runtime DLLs (recursive to fixed point)
+        run: |
+          BIN="${{ steps.locate.outputs.bin }}"
+          BIN_DIR="$(dirname "$BIN")"
+          # Walk the DLL dependency graph from openmsx.exe to a fixed point.
+          # Each pass: for every PE in BIN_DIR (including DLLs just copied
+          # in by previous passes), enumerate its imported DLLs via
+          # objdump, copy any that exist in /mingw64/bin and are not yet
+          # present. Stop once a pass copies nothing new.
+          pass=0
+          while true; do
+            pass=$((pass + 1))
+            added=0
+            for f in "$BIN_DIR"/*.exe "$BIN_DIR"/*.dll; do
+              [ -f "$f" ] || continue
+              while IFS= read -r d; do
+                [ -n "$d" ] || continue
+                if [ ! -f "$BIN_DIR/$d" ] && [ -f "/mingw64/bin/$d" ]; then
+                  cp "/mingw64/bin/$d" "$BIN_DIR/"
+                  echo "[pass $pass] +$d"
+                  added=$((added + 1))
+                fi
+              done < <(objdump -p "$f" 2>/dev/null | awk '/DLL Name:/ {print $3}')
+            done
+            [ "$added" -eq 0 ] && break
+            [ "$pass" -ge 10 ] && { echo "Safety: stopping after 10 passes"; break; }
+          done
+          echo "=== Final DLL set ==="
+          ls -la "$BIN_DIR"/*.dll | awk '{print $9, $5}'
+
+      - name: Stage release tree
+        run: |
+          BIN="${{ steps.locate.outputs.bin }}"
+          BIN_DIR="$(dirname "$BIN")"
+          mkdir -p out/openmsx-windows/share
+          cp "$BIN_DIR"/*.exe "$BIN_DIR"/*.dll out/openmsx-windows/
+          cp -r openMSX/share/extensions out/openmsx-windows/share/
           cp README.md out/openmsx-windows/
-          # Confirm self-contained
-          BIN="out/openmsx-windows/openmsx.exe"
-          echo "=== Runtime DLL deps of final binary ==="
-          objdump -p "$BIN" | awk '/DLL Name:/ {print $3}' | sort -u
 
       - uses: actions/upload-artifact@v4
         with:

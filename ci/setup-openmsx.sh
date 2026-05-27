@@ -109,32 +109,6 @@ s = s.replace(
     "-L/mingw/lib -L/mingw/lib/w32api -lws2_32 -lwsock32 -liphlpapi -lwinmm")
 p.write_text(s)
 PY
-    # Force C11 for the pkg-config 0.29.2 bundled glib build. GCC 16+
-    # defaults to C23 where `bool` is a keyword, but the upstream
-    # pkg-config tarball that openMSX downloads pre-dates C23 and uses
-    # `bool` as a variable name. 3rdparty.mk hardcodes CFLAGS at the
-    # pkg-config configure call, so env CFLAGS does not propagate —
-    # extend the hardcoded flags here.
-    python3 - <<'PY'
-import pathlib
-p = pathlib.Path("build/3rdparty.mk")
-s = p.read_text()
-# Old glib bundled in pkg-config 0.29.2 (2017) trips a stack of modern GCC defaults:
-#   -std=gnu11                          : `bool` is a C23 keyword in GCC 16; glib uses it as var name.
-#   -w                                  : suppress -Werror=format= and friends auto-enabled by glib.
-#   -Wno-error=incompatible-pointer-types,
-#   -Wno-error=implicit-function-declaration,
-#   -Wno-error=implicit-int,
-#   -Wno-error=return-mismatch          : in GCC 14+ these were promoted from warnings to HARD
-#                                         errors by default (-w does not affect them), so each
-#                                         needs explicit demotion to keep glib compiling.
-s = s.replace(
-    'CFLAGS="-Wno-error=int-conversion"',
-    'CFLAGS="-Wno-error=int-conversion -Wno-error=incompatible-pointer-types '
-    '-Wno-error=implicit-function-declaration -Wno-error=implicit-int '
-    '-Wno-error=return-mismatch -std=gnu11 -w"')
-p.write_text(s)
-PY
 fi
 
 echo "openMSX prepared at: ${OPENMSX_DIR}"

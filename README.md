@@ -9,10 +9,10 @@ Thanks a lot Tiburoncio!
 >
 > For discovering the Windows DLL-hell bug that broke every fresh install
 > of pre-v0.9.4 builds — the bundled `openmsx.exe` was leaking transitive
-> MinGW runtime DLLs that nobody on a fresh box had. His report forced
-> the switch from "ship .exe + 14 DLLs and pray" to a fully static binary
-> distribution via openMSX's `staticbindist` target. Now the Windows zip
-> contains exactly one `openmsx.exe` that just works. 🙏
+> MinGW runtime DLLs (only one level of `objdump -p` recursion in the CI
+> workflow). His report drove the fix to walk the import table to a
+> fixed point so the Windows ZIP now genuinely contains every DLL the
+> binary needs. 🙏
 >
 > *Submitted bug reports, accepted in lieu of tribute.*
 
@@ -110,101 +110,84 @@ msx/
 
 ## Building
 
-The project ships with a GitHub Actions workflow
-([`.github/workflows/build.yml`](.github/workflows/build.yml)) that builds
-openMSX with the UnapiNet extension on Windows, Linux and macOS, and
-assembles `UNAPINET.COM` with Nestor80. Pre-built artifacts are attached
-to every run on the [Actions tab](../../actions).
+The recommended way to obtain a build is **not** to compile it yourself
+— just download the pre-built ZIP for your platform from
+[Releases](../../releases). The CI workflow at
+[`.github/workflows/build.yml`](.github/workflows/build.yml) produces
+those releases for every tagged commit (`v*`).
 
-To reproduce a build locally, run [`ci/setup-openmsx.sh`](ci/setup-openmsx.sh).
-The script clones openMSX at `RELEASE_21_0`, drops the extension into
-`src/unapinet/`, registers the device class in `DeviceFactory.cc` and
-applies the platform patches listed below. After it finishes, run `make`
-inside `openMSX/` with the appropriate environment for your OS.
+If you do want to build from source, the [`ci/setup-openmsx.sh`](ci/setup-openmsx.sh)
+script automates everything documented below — clones openMSX, drops in
+the extension sources, registers the device class, applies platform
+patches. After it finishes, you run `make` in `openMSX/`.
 
 ### Prerequisites
 
-- [openMSX](https://github.com/openMSX/openMSX) source tree, tested with
-  `RELEASE_21_0`
-- [Nestor80](https://github.com/Konamiman/Nestor80) Z80 assembler
-- A Nextor 2.1.x ROM (the MSX RAM helper used by the TSR is part of Nextor)
-- On Windows: [MSYS2](https://www.msys2.org/) MINGW64 environment with the
-  packages listed below
+- An openMSX source tree (cloned by the setup script, currently pinned
+  to `RELEASE_21_0`).
+- A C++17-capable compiler. On Windows this means the MSYS2 MINGW64
+  toolchain.
+- [Nestor80](https://github.com/Konamiman/Nestor80) Z80 assembler, for
+  building `UNAPINET.COM`.
+- A Nextor 2.1.x ROM at runtime (RAM-helper that the TSR depends on);
+  not needed at build time.
+
+### Building from source (canonical, all platforms)
 
 ```bash
-pacman -S --needed mingw-w64-x86_64-{gcc,SDL2,SDL2_ttf,freetype,glew,libpng,tcl,zlib,libogg,libvorbis,libtheora,mtools}
+git clone https://github.com/antxiko/openMSXnet.git
+cd openMSXnet
+bash ci/setup-openmsx.sh                # clones openMSX + applies patches
+cd openMSX && make -j$(nproc)
 ```
 
-### openMSX device extension
+Linux / macOS install their build-time deps via apt / brew:
 
-1. Clone openMSX and check out the supported release:
-   ```bash
-   git clone https://github.com/openMSX/openMSX.git
-   cd openMSX && git checkout RELEASE_21_0
-   ```
+```bash
+# Debian / Ubuntu
+sudo apt install build-essential pkg-config python3 \
+    libsdl2-dev libsdl2-ttf-dev libfreetype-dev libglew-dev \
+    libpng-dev libxml2-dev tcl-dev libogg-dev libvorbis-dev \
+    libtheora-dev libasound2-dev libjack-jackd2-dev
 
-2. Stage the device sources:
-   ```bash
-   mkdir -p src/unapinet
-   cp /path/to/openMSXnet/unapinet/UnapiNet.{hh,cc} src/unapinet/
-   cp /path/to/openMSXnet/unapinet/unapinet.xml share/extensions/
-   ```
+# macOS (Homebrew)
+brew install sdl2 sdl2_ttf freetype glew libpng libxml2 \
+    tcl-tk libogg libvorbis theora pkg-config
+```
 
-3. Register the device in `src/DeviceFactory.cc`:
-   ```cpp
-   #include "UnapiNet.hh"
-   // ...
-   } else if (type == "UnapiNet") {
-       result = std::make_unique<UnapiNet>(conf);
-   }
-   ```
+The resulting binary is dynamically linked against these. End users on
+the same OS install matching runtime packages and run it directly.
 
-4. Apply the following patches to make `RELEASE_21_0` build cleanly under
-   MSYS2 MINGW64:
+### Windows distribution bundle
 
-   `build/msysutils.py` — Python 3 compatibility:
-   ```python
-   '"%s" -c \'import sys ; print(sys.argv[1])\' /'
-   msysRoot = stdoutdata.strip().decode('utf-8') if isinstance(stdoutdata, bytes) else stdoutdata.strip()
-   ```
+`openmsx.exe` on Windows is dynamically linked against the standard
+MinGW runtime libraries (SDL2, Tcl, libxml2, freetype, glew, libpng,
+ogg, vorbis, theora, zlib and their transitive deps). The CI workflow's
+"Bundle runtime DLLs" step walks the PE import table of `openmsx.exe`
+and every DLL it copies in, to a fixed point, so the resulting ZIP
+contains every DLL the binary actually references — `libgraphite2.dll`,
+`libpcre2-8-0.dll` and friends are not missed.
 
-   `build/platform-mingw-w64.mk` — replace the global `-static` with a
-   selective static link of the GCC runtime, otherwise Tcl cannot be
-   linked dynamically:
-   ```makefile
-   LINK_FLAGS:= -static-libgcc -static-libstdc++ $(LINK_FLAGS)
-   ```
+For people building locally on MSYS2 MINGW64 the binary lands in
+`openMSX/derived/x86_64-mingw-w64-opt/bin/openmsx.exe` and the matching
+DLLs are in `/mingw64/bin/`. Bundle them with `objdump -p` if you need
+a portable copy.
 
-   `build/platform-mingw32.mk` — add Winsock 2 (the default `-lwsock32` is
-   Winsock 1 and lacks `getaddrinfo`, `inet_pton`, `freeaddrinfo`):
-   ```makefile
-   -L/mingw/lib -L/mingw/lib/w32api -lws2_32 -lwsock32 -lwinmm ...
-   ```
+### Patches applied by `ci/setup-openmsx.sh`
 
-   `build/main.mk` — `-ldl` is Linux-specific:
-   ```makefile
-   LINK_FLAGS:=-pthread
-   ifneq ($(filter linux%,$(OPENMSX_TARGET_OS)),)
-   LINK_FLAGS+=-ldl
-   endif
-   ```
+For reference (the script handles all of these automatically):
 
-5. Build from the MSYS2 MINGW64 shell:
-   ```bash
-   export PYTHON=/mingw64/bin/python3 MSYSCON=yes SHELL=/usr/bin/bash TCL_CONFIG=/mingw64/lib
-   make -j8
-   ```
-
-6. Copy the runtime DLLs alongside the resulting `openmsx.exe` (in
-   `derived/x86_64-mingw-w64-opt/bin/`):
-   ```
-   SDL2.dll SDL2_ttf.dll libfreetype-6.dll glew32.dll libogg-0.dll
-   libpng16-16.dll libtheoradec-2.dll libvorbis-0.dll tcl86.dll
-   zlib1.dll libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll
-   libbz2-1.dll libbrotlidec.dll libbrotlicommon.dll libharfbuzz-0.dll
-   libglib-2.0-0.dll libintl-8.dll libiconv-2.dll libpcre2-8-0.dll
-   libgraphite2.dll
-   ```
+- `build/main.mk` — gate `-ldl` to Linux only (macOS and mingw don't have it).
+- `build/msysutils.py` — Python 3 `print()` + bytes/str decoding.
+- `build/platform-mingw-w64.mk` — replace `-static` with selective
+  `-static-libgcc -static-libstdc++` (full `-static` previously
+  conflicted with the dynamic Tcl path; superseded by staticbindist
+  but kept for legacy `make` builds).
+- `build/platform-mingw32.mk` — add `-lws2_32 -liphlpapi` for Winsock 2
+  and `IcmpSendEcho`.
+- `src/DeviceFactory.cc` — register the `UnapiNet` device class.
+- Copies `unapinet/UnapiNet.{hh,cc}` into `src/unapinet/` and
+  `unapinet/unapinet.xml` into `share/extensions/`.
 
 ### MSX TSR
 
@@ -212,9 +195,13 @@ pacman -S --needed mingw-w64-x86_64-{gcc,SDL2,SDL2_ttf,freetype,glew,libpng,tcl,
 N80 msx/unapinet.asm msx/unapinet.com --direct-output-write
 ```
 
-The output binary is roughly 2 KiB. Copy it to a Nextor disk image
-alongside `NEXTOR.SYS` and `COMMAND2.COM` (for example with `mcopy`
-from the `mtools` package).
+The output binary is roughly 2 KiB. Copy it onto a Nextor disk image
+alongside `NEXTOR.SYS` and `COMMAND2.COM` — for example with `mcopy`
+from the `mtools` package:
+
+```bash
+mcopy -o -i path/to/nextor_hd.dsk@@512 msx/unapinet.com ::
+```
 
 ### Running
 

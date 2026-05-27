@@ -13,18 +13,25 @@ building from source, see [README.md](../README.md).
 
 ### Files produced by the build
 
-The CI workflow publishes one artifact per platform plus the MSX TSR:
+Every tagged release on GitHub attaches one ZIP per platform plus the
+MSX TSR:
 
-| Artifact                  | Contents                                                                |
-|---------------------------|-------------------------------------------------------------------------|
-| `openmsx-windows-x86_64`  | `openmsx.exe` + bundled MinGW runtime DLLs + `share/extensions/`        |
-| `openmsx-linux-x86_64`    | `openmsx` ELF binary + `share/extensions/`                              |
-| `openmsx-macos-arm64`     | `openmsx` Mach-O binary + `share/extensions/`                           |
-| `UNAPINET.COM`            | The Z80 TSR (~2 KiB) that you copy onto the MSX disk image              |
+| Asset                          | Contents                                                                                  |
+|--------------------------------|-------------------------------------------------------------------------------------------|
+| `openmsx-windows-x86_64.zip`   | `openmsx.exe` + the full set of MinGW runtime DLLs it needs + `share/`. Extract and run.  |
+| `openmsx-linux-x86_64.zip`     | `openmsx` ELF binary + `share/`. Install matching SDL2/Tcl/etc. via your package manager. |
+| `openmsx-macos-arm64.zip`      | `openmsx` Mach-O binary + `share/`. Install dependencies via Homebrew.                    |
+| `UNAPINET.COM`                 | The Z80 TSR (~2 KiB) that you copy onto the MSX disk image.                               |
 
-Download from the **Actions** tab on GitHub:
-<https://github.com/antxiko/openMSXnet/actions> → pick the latest successful
-run → scroll to *Artifacts*.
+Download from the **Releases** page:
+<https://github.com/antxiko/openMSXnet/releases> → pick the latest tag
+(e.g. `v0.9.4`) → download the assets you need.
+
+> The Windows ZIP bundles every runtime DLL that `openmsx.exe` (and its
+> transitive deps) needs. The CI workflow walks the import table to a
+> fixed point, so the set is complete and self-contained at the
+> directory level — extract the ZIP and run, no separate MinGW install
+> required.
 
 ### Other things you need to gather yourself
 
@@ -72,10 +79,11 @@ them by path on the command line).
 
 ### 3.1 Unpack the build
 
-1. Download `openmsx-windows-x86_64.zip` from the latest CI run.
+1. Download `openmsx-windows-x86_64.zip` from the latest release at
+   <https://github.com/antxiko/openMSXnet/releases>.
 2. Extract somewhere stable, for example `C:\Tools\openmsx\`. The folder
-   should contain `openmsx.exe`, a handful of `.dll` files, and a
-   `share/` subdirectory.
+   contains `openmsx.exe`, the runtime DLLs it depends on (all bundled
+   in the ZIP — extract everything together) and a `share/` subdirectory.
 3. Verify `share/extensions/unapinet.xml` is present.
 
 ### 3.2 Provide ROMs
