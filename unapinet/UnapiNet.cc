@@ -1056,6 +1056,14 @@ void UnapiNet::cmdUdpOpen()
 
     setNonBlocking(ISOCK(s));
 
+    // Enable broadcast — required by UNAPI clients that do LAN service
+    // discovery via sendto(255.255.255.255). Real-hardware UNAPI stacks
+    // (GR8NET, Obsonet) allow it implicitly; the BSD socket layer needs
+    // the explicit opt-in.
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_BROADCAST,
+               reinterpret_cast<const char*>(&one), sizeof(one));
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
