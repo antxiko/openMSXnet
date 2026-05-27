@@ -3,6 +3,19 @@
 First of all, many many thanks to @mcolom, because the idea of this project born thanks to him!
 Thanks a lot Tiburoncio!
 
+> # 👑 Hall of Bug Hunters 👑
+>
+> ## 🍓 Su Excelentísima Frutajestad Excelentísimo **FranSX** 🍓
+>
+> For discovering the Windows DLL-hell bug that broke every fresh install
+> of pre-v0.9.4 builds — the bundled `openmsx.exe` was leaking transitive
+> MinGW runtime DLLs that nobody on a fresh box had. His report forced
+> the switch from "ship .exe + 14 DLLs and pray" to a fully static binary
+> distribution via openMSX's `staticbindist` target. Now the Windows zip
+> contains exactly one `openmsx.exe` that just works. 🙏
+>
+> *Submitted bug reports, accepted in lieu of tribute.*
+
 [![build](https://github.com/antxiko/openMSXnet/actions/workflows/build.yml/badge.svg)](https://github.com/antxiko/openMSXnet/actions/workflows/build.yml)
 
 An MSX TCP/IP UNAPI implementation that exposes the host operating system's
