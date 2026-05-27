@@ -214,6 +214,10 @@ jobs:
           PYTHON: /mingw64/bin/python3
           MSYSCON: 'yes'
           SHELL: /usr/bin/bash
+          # GCC 16+ defaults to C23 where `bool` is a keyword. The bundled
+          # pkg-config 0.29.2 + glib that openMSX downloads pre-date that
+          # and use `bool` as a variable name. Force C11 so it builds.
+          CFLAGS: '-std=gnu11'
         run: |
           # staticbindist downloads + statically compiles all 3rdparty deps
           # (SDL2, Tcl, libxml2, freetype, glew, libpng, ogg, vorbis, theora,
