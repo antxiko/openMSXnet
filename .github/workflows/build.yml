@@ -190,6 +190,12 @@ jobs:
           sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
 
       - name: Stage openMSX source tree
+        # Force target OS so setup-openmsx.sh applies the mingw patches
+        # (Winsock 2 + iphlpapi). Without this env var the script
+        # auto-detects the host (Linux) and skips them, leaving the
+        # final link without -liphlpapi → IcmpSendEcho undefined.
+        env:
+          OPENMSX_TARGET_OS: mingw-w64
         run: bash ci/setup-openmsx.sh
 
       - name: Build self-contained binary distribution
