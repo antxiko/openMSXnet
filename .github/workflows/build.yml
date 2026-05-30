@@ -170,46 +170,39 @@ jobs:
 
   windows:
     name: openMSX Windows (x86_64)
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
+    # Cross-compile from Ubuntu 24.04 (gcc 13) — mirrors the official
+    # openMSX project's own CI. Sidesteps MSYS2 mingw's GCC 16 + C23
+    # incompatibility with the pkg-config 0.29.2 bundled glib that
+    # staticbindist downloads, which broke the MSYS2-based attempts.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            git
-            make
-            python
-            mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-SDL2
-            mingw-w64-x86_64-SDL2_ttf
-            mingw-w64-x86_64-freetype
-            mingw-w64-x86_64-glew
-            mingw-w64-x86_64-libpng
-            mingw-w64-x86_64-libxml2
-            mingw-w64-x86_64-tcl
-            mingw-w64-x86_64-zlib
-            mingw-w64-x86_64-libogg
-            mingw-w64-x86_64-libvorbis
-            mingw-w64-x86_64-libtheora
+      - name: Install cross-compile prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mingw-w64 gcc g++ make tcl python3
+
+      - name: Configure mingw to use POSIX threads
+        run: |
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
 
       - name: Stage openMSX source tree
         run: bash ci/setup-openmsx.sh
 
-      - name: Build openMSX
+      - name: Build self-contained binary distribution
         working-directory: openMSX
-        env:
-          PYTHON: /mingw64/bin/python3
-          MSYSCON: 'yes'
-          SHELL: /usr/bin/bash
-          TCL_CONFIG: /mingw64/lib
-        run: make -j$(nproc) OPENMSX_TARGET_OS=mingw32
+        run: |
+          # staticbindist downloads + statically links every 3rdparty dep
+          # (SDL2, Tcl, libxml2, freetype, glew, libpng, ogg, vorbis,
+          # theora, zlib) into openmsx.exe. Output is a single
+          # self-contained .exe under derived/.../bindist/install/ —
+          # no DLLs to ship.
+          make -j$(nproc) staticbindist \
+            OPENMSX_TARGET_CPU=x86_64 \
+            OPENMSX_TARGET_OS=mingw-w64
 
       - name: Dump probe.log on failure
         if: failure()
@@ -218,56 +211,26 @@ jobs:
             [ -f "$f" ] && { echo "=== $f ==="; cat "$f"; }
           done
 
-      - name: Locate binary
-        id: locate
-        run: |
-          BIN=$(find openMSX/derived -type f -name openmsx.exe | head -n1)
-          if [ -z "$BIN" ]; then
-            echo "openmsx.exe not found"
-            find openMSX/derived -maxdepth 4 -type f
-            exit 1
-          fi
-          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
-          file "$BIN"
-
-      - name: Bundle runtime DLLs (recursive to fixed point)
-        run: |
-          BIN="${{ steps.locate.outputs.bin }}"
-          BIN_DIR="$(dirname "$BIN")"
-          # Walk the DLL dependency graph from openmsx.exe to a fixed point.
-          # Each pass: for every PE in BIN_DIR (including DLLs just copied
-          # in by previous passes), enumerate its imported DLLs via
-          # objdump, copy any that exist in /mingw64/bin and are not yet
-          # present. Stop once a pass copies nothing new.
-          pass=0
-          while true; do
-            pass=$((pass + 1))
-            added=0
-            for f in "$BIN_DIR"/*.exe "$BIN_DIR"/*.dll; do
-              [ -f "$f" ] || continue
-              while IFS= read -r d; do
-                [ -n "$d" ] || continue
-                if [ ! -f "$BIN_DIR/$d" ] && [ -f "/mingw64/bin/$d" ]; then
-                  cp "/mingw64/bin/$d" "$BIN_DIR/"
-                  echo "[pass $pass] +$d"
-                  added=$((added + 1))
-                fi
-              done < <(objdump -p "$f" 2>/dev/null | awk '/DLL Name:/ {print $3}')
-            done
-            [ "$added" -eq 0 ] && break
-            [ "$pass" -ge 10 ] && { echo "Safety: stopping after 10 passes"; break; }
-          done
-          echo "=== Final DLL set ==="
-          ls -la "$BIN_DIR"/*.dll | awk '{print $9, $5}'
-
       - name: Stage release tree
         run: |
-          BIN="${{ steps.locate.outputs.bin }}"
-          BIN_DIR="$(dirname "$BIN")"
-          mkdir -p out/openmsx-windows/share
-          cp "$BIN_DIR"/*.exe "$BIN_DIR"/*.dll out/openmsx-windows/
-          cp -r openMSX/share/extensions out/openmsx-windows/share/
+          INSTALL=$(find openMSX/derived -path "*/bindist/install" -type d | head -n1)
+          if [ -z "$INSTALL" ]; then
+            echo "bindist install dir not found"
+            find openMSX/derived -maxdepth 4 -type d
+            exit 1
+          fi
+          echo "Found install: $INSTALL"
+          ls -la "$INSTALL"
+          mkdir -p out/openmsx-windows
+          cp -r "$INSTALL"/. out/openmsx-windows/
           cp README.md out/openmsx-windows/
+          # Sanity: confirm what DLLs the .exe actually imports (should be
+          # only Windows system DLLs).
+          BIN="out/openmsx-windows/openmsx.exe"
+          if [ -f "$BIN" ]; then
+            echo "=== imported DLLs of self-contained openmsx.exe ==="
+            x86_64-w64-mingw32-objdump -p "$BIN" | awk '/DLL Name:/ {print "  ", $3}' | sort -u
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
