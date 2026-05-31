@@ -90,15 +90,13 @@ s = s.replace(
     "if isinstance(stdoutdata, bytes) else stdoutdata.strip()\n", 1)
 p.write_text(s)
 PY
-    # Selective static link (full -static breaks dynamic Tcl).
-    python3 - <<'PY'
-import pathlib
-p = pathlib.Path("build/platform-mingw-w64.mk")
-s = p.read_text()
-s = s.replace("LINK_FLAGS:= -static $(LINK_FLAGS)",
-              "LINK_FLAGS:= -static-libgcc -static-libstdc++ $(LINK_FLAGS)")
-p.write_text(s)
-PY
+    # NOTE: previous iterations replaced upstream's `-static` with
+    # `-static-libgcc -static-libstdc++` to make the legacy dynamic
+    # Tcl link path succeed. We now build via staticbindist (all
+    # 3rdparty libs are .a archives) so the upstream `-static` works
+    # again — and is required to pull libwinpthread-1.dll's symbols
+    # into the .exe instead of leaving it as a runtime DLL dep.
+    # Leaving platform-mingw-w64.mk untouched.
     # Winsock 2 + iphlpapi (for IcmpSendEcho).
     python3 - <<'PY'
 import pathlib
