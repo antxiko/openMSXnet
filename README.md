@@ -7,12 +7,15 @@ Thanks a lot Tiburoncio!
 >
 > ## 🍓 Su Excelentísima Frutajestad Excelentísimo **FranSX** 🍓
 >
-> For discovering the Windows DLL-hell bug that broke every fresh install
-> of pre-v0.9.4 builds — the bundled `openmsx.exe` was leaking transitive
-> MinGW runtime DLLs (only one level of `objdump -p` recursion in the CI
-> workflow). His report drove the fix to walk the import table to a
-> fixed point so the Windows ZIP now genuinely contains every DLL the
-> binary needs. 🙏
+> For discovering — and persistently re-reporting — the Windows DLL-hell
+> bug that broke every fresh install through v0.9.4. The early "ship
+> .exe + a pile of DLLs" approaches kept leaking transitive deps,
+> hitting antivirus false positives, and failing extractions on clean
+> machines. His refusal to let it slide drove the move to upstream
+> openMSX's own recipe: cross-compile `staticbindist` from Ubuntu so
+> SDL2, Tcl, freetype, glew and friends end up linked directly into
+> `openmsx.exe`. The Windows ZIP is now a single self-contained
+> binary — no DLL hell forever. 🙏
 >
 > *Submitted bug reports, accepted in lieu of tribute.*
 
@@ -160,18 +163,28 @@ the same OS install matching runtime packages and run it directly.
 
 ### Windows distribution bundle
 
-`openmsx.exe` on Windows is dynamically linked against the standard
-MinGW runtime libraries (SDL2, Tcl, libxml2, freetype, glew, libpng,
-ogg, vorbis, theora, zlib and their transitive deps). The CI workflow's
-"Bundle runtime DLLs" step walks the PE import table of `openmsx.exe`
-and every DLL it copies in, to a fixed point, so the resulting ZIP
-contains every DLL the binary actually references — `libgraphite2.dll`,
-`libpcre2-8-0.dll` and friends are not missed.
+`openmsx.exe` on Windows is produced by **cross-compiling openMSX's
+`staticbindist` target from Ubuntu 24.04** — the same recipe the
+upstream openMSX project uses for its own Windows releases. The CI
+workflow installs the Ubuntu `mingw-w64` cross-toolchain (`gcc 13`,
+which compiles the bundled pkg-config + glib sources cleanly, unlike
+MSYS2's bleeding-edge `gcc 16` which trips over C23 keyword changes),
+configures it for POSIX threads, and runs:
 
-For people building locally on MSYS2 MINGW64 the binary lands in
-`openMSX/derived/x86_64-mingw-w64-opt/bin/openmsx.exe` and the matching
-DLLs are in `/mingw64/bin/`. Bundle them with `objdump -p` if you need
-a portable copy.
+```bash
+make -j$(nproc) staticbindist \
+    OPENMSX_TARGET_CPU=x86_64 \
+    OPENMSX_TARGET_OS=mingw-w64
+```
+
+The build downloads SDL2, Tcl, libxml2, freetype, glew, libpng, ogg,
+vorbis, theora and zlib source tarballs, compiles them as static
+archives, then statically links every one of them — plus `libwinpthread`
+and the MinGW C++ runtime — into `openmsx.exe`. The resulting binary's
+only imports are Windows system DLLs (`KERNEL32`, `USER32`, `OPENGL32`,
+`WS2_32`, `IPHLPAPI`, `msvcrt`, …). The release ZIP contains the .exe
+plus `share/` and nothing else — no MinGW DLLs to bundle, no antivirus
+landmines, no extraction edge cases.
 
 ### Patches applied by `ci/setup-openmsx.sh`
 

@@ -18,20 +18,21 @@ MSX TSR:
 
 | Asset                          | Contents                                                                                  |
 |--------------------------------|-------------------------------------------------------------------------------------------|
-| `openmsx-windows-x86_64.zip`   | `openmsx.exe` + the full set of MinGW runtime DLLs it needs + `share/`. Extract and run.  |
+| `openmsx-windows-x86_64.zip`   | Single self-contained `openmsx.exe` (statically linked, no DLLs) + `share/`.              |
 | `openmsx-linux-x86_64.zip`     | `openmsx` ELF binary + `share/`. Install matching SDL2/Tcl/etc. via your package manager. |
 | `openmsx-macos-arm64.zip`      | `openmsx` Mach-O binary + `share/`. Install dependencies via Homebrew.                    |
 | `UNAPINET.COM`                 | The Z80 TSR (~2 KiB) that you copy onto the MSX disk image.                               |
 
 Download from the **Releases** page:
-<https://github.com/antxiko/openMSXnet/releases> → pick the latest tag
-(e.g. `v0.9.4`) → download the assets you need.
+<https://github.com/antxiko/openMSXnet/releases> → pick the latest tag →
+download the assets you need.
 
-> The Windows ZIP bundles every runtime DLL that `openmsx.exe` (and its
-> transitive deps) needs. The CI workflow walks the import table to a
-> fixed point, so the set is complete and self-contained at the
-> directory level — extract the ZIP and run, no separate MinGW install
-> required.
+> The Windows binary is produced by openMSX's `staticbindist` target
+> (the same mechanism the upstream openMSX project uses for its
+> releases): SDL2, Tcl, libxml2, freetype, glew, libpng, ogg, vorbis,
+> theora, zlib and the MinGW pthread runtime are all linked directly
+> into `openmsx.exe`. The only imports it has are Windows system DLLs
+> (KERNEL32, USER32, OPENGL32, …). Extract the ZIP anywhere and run.
 
 ### Other things you need to gather yourself
 
@@ -82,8 +83,8 @@ them by path on the command line).
 1. Download `openmsx-windows-x86_64.zip` from the latest release at
    <https://github.com/antxiko/openMSXnet/releases>.
 2. Extract somewhere stable, for example `C:\Tools\openmsx\`. The folder
-   contains `openmsx.exe`, the runtime DLLs it depends on (all bundled
-   in the ZIP — extract everything together) and a `share/` subdirectory.
+   contains a single `openmsx.exe` (no DLLs needed) and a `share/`
+   subdirectory.
 3. Verify `share/extensions/unapinet.xml` is present.
 
 ### 3.2 Provide ROMs
