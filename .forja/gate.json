@@ -1,0 +1,17 @@
+{
+  "min_tests": 1,
+  "checks": [
+    {
+      "name": "tsr-reassembly",
+      "command": "python .forja/checks/reassemble.py",
+      "required": true,
+      "is_test": false
+    },
+    {
+      "name": "ie-invariant",
+      "command": "python .forja/checks/ie_invariant.py",
+      "required": true,
+      "is_test": true
+    }
+  ]
+}

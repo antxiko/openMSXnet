@@ -28,3 +28,4 @@ run.bat
 Thumbs.db
 .DS_Store
 unapinet_debug.log
+.forja/gate-report/

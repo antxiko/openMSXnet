@@ -491,6 +491,13 @@ OLD_EXTBIO:
         ;====================================
 
 UNAPI_ENTRY:
+        di                      ; [FIX 2026-06-08] transaccion de puertos ATOMICA.
+                                ; El cliente puede llamar con IE=1 (EnableInterrupt en
+                                ; sus bucles de sondeo, necesario para InterNestor real).
+                                ; Sin DI, una interrupcion reentra a media transaccion
+                                ; (out IO_CMD / in IO_DATA xN) y desincroniza el device
+                                ; C++ -> longitud basura / "0 bytes" -> cuelgue.
+                                ; Cada funcion repone EI en su 'ret' final (verificado).
         push    hl
         push    af
         ; Fast path: fn 29 = TCPIP_WAIT
@@ -1036,9 +1043,11 @@ FN_TCP_SEND:
         jr      nz,.ts_serr
         in      a,(IO_DATA)     ; 0=ok, 1=error
         or      a
+        ei                      ; [FIX 2026-06-08] reponer IE ANTES de ambos returns:
+                                ; el 'ret z' del path OK salia SIN ei (fuga de IE que,
+                                ; con el di global de UNAPI_ENTRY, colgaria la maquina).
         ret     z               ; A=0 = ERR_OK
         ld      a,ERR_CONN_STATE
-        ei
         ret
 .ts_serr:
         ld      a,ERR_CONN_STATE
