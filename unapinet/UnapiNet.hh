@@ -227,6 +227,10 @@ private:
 
     [[nodiscard]] int allocTcpHandle();
     void closeTcpSocket(int h);
+    // Quick teardown of a live connection from the receiver/send paths: record
+    // the reason, close the socket and mark it CLOSED (does not clear the
+    // remote/local metadata — that is closeTcpSocket's job).
+    void forceClose(TcpConnection& c, CloseReason reason);
     [[nodiscard]] int allocUdpHandle();
     void closeUdpSocket(int h);
     void closeAllConnections();

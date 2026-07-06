@@ -230,6 +230,17 @@ void UnapiNet::closeAllConnections()
 //  transiciones de estado (cierre remoto, etc.).
 // ============================================================
 
+void UnapiNet::forceClose(TcpConnection& c, CloseReason reason)
+{
+    c.closeReason = reason;
+    if (c.sock != OPENMSX_INVALID_SOCKET) {
+        sock_close(c.sock);
+        c.sock = OPENMSX_INVALID_SOCKET;
+    }
+    c.tcpState   = TCP_CLOSED;
+    c.connecting = false;
+}
+
 void UnapiNet::receiverLoop()
 {
     while (running) {
@@ -278,11 +289,7 @@ void UnapiNet::receiverLoop()
                                nullptr, &wfds, &efds, &tv);
                 if (r > 0) {
                     if (FD_ISSET(sd, &efds)) {
-                        c.tcpState    = TCP_CLOSED;
-                        c.closeReason = CloseReason::ConnectFailed;
-                        c.connecting  = false;
-                        sock_close(sd);
-                        c.sock = OPENMSX_INVALID_SOCKET;
+                        forceClose(c, CloseReason::ConnectFailed);
                     } else if (FD_ISSET(sd, &wfds)) {
                         int err = 0;
                         ::socklen_t elen = sizeof(err);
@@ -292,11 +299,7 @@ void UnapiNet::receiverLoop()
                             c.tcpState   = TCP_ESTABLISHED;
                             c.connecting = false;
                         } else {
-                            c.tcpState    = TCP_CLOSED;
-                            c.closeReason = CloseReason::ConnectFailed;
-                            c.connecting  = false;
-                            sock_close(sd);
-                            c.sock = OPENMSX_INVALID_SOCKET;
+                            forceClose(c, CloseReason::ConnectFailed);
                         }
                     }
                 }
@@ -323,10 +326,7 @@ void UnapiNet::receiverLoop()
             } else if (n == 0) {
                 c.tcpState = TCP_CLOSE_WAIT;
             } else {
-                c.tcpState    = TCP_CLOSED;
-                c.closeReason = CloseReason::ConnectionReset;
-                sock_close(sd);
-                c.sock = OPENMSX_INVALID_SOCKET;
+                forceClose(c, CloseReason::ConnectionReset);
             }
         }
 
@@ -687,10 +687,7 @@ void UnapiNet::cmdTcpSend()
     while (sent < len) {
         auto n = sock_send(c.sock, data + sent, len - sent);
         if (n <= 0) {
-            c.tcpState    = TCP_CLOSED;
-            c.closeReason = CloseReason::ConnectionReset;
-            sock_close(c.sock);
-            c.sock = OPENMSX_INVALID_SOCKET;
+            forceClose(c, CloseReason::ConnectionReset);
             setResultByte(1);
             return;
         }
