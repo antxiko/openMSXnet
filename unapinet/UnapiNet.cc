@@ -92,7 +92,7 @@ void UnapiNet::reset(EmuTime /*time*/)
 
     closeAllConnections();
 
-    dns.status = 0;
+    dns.status = DnsStatus::Idle;
     dns.resolvedIP = 0;
     dns.errorCode = 0;
 }
@@ -214,7 +214,7 @@ void UnapiNet::closeAllConnections()
 {
     for (int i = 1; i <= MAX_TCP; i++) {
         closeTcpSocket(i);
-        tcp[i - 1].closeReason = 1;
+        tcp[i - 1].closeReason = CloseReason::NeverUsed;
     }
     for (int i = 1; i <= MAX_UDP; i++) {
         closeUdpSocket(i);
@@ -279,7 +279,7 @@ void UnapiNet::receiverLoop()
                 if (r > 0) {
                     if (FD_ISSET(sd, &efds)) {
                         c.tcpState    = TCP_CLOSED;
-                        c.closeReason = 6;
+                        c.closeReason = CloseReason::ConnectFailed;
                         c.connecting  = false;
                         sock_close(sd);
                         c.sock = OPENMSX_INVALID_SOCKET;
@@ -293,7 +293,7 @@ void UnapiNet::receiverLoop()
                             c.connecting = false;
                         } else {
                             c.tcpState    = TCP_CLOSED;
-                            c.closeReason = 6;
+                            c.closeReason = CloseReason::ConnectFailed;
                             c.connecting  = false;
                             sock_close(sd);
                             c.sock = OPENMSX_INVALID_SOCKET;
@@ -324,7 +324,7 @@ void UnapiNet::receiverLoop()
                 c.tcpState = TCP_CLOSE_WAIT;
             } else {
                 c.tcpState    = TCP_CLOSED;
-                c.closeReason = 4;
+                c.closeReason = CloseReason::ConnectionReset;
                 sock_close(sd);
                 c.sock = OPENMSX_INVALID_SOCKET;
             }
@@ -447,7 +447,7 @@ void UnapiNet::cmdDnsQuery()
         // Es una IP directa
         uint32_t ip = ntohl(addr.s_addr);
         dns.resolvedIP = ip;
-        dns.status = 2; // complete
+        dns.status = DnsStatus::Complete; // complete
         dns.errorCode = 0;
 
         DnsQueryResult r{};
@@ -458,13 +458,13 @@ void UnapiNet::cmdDnsQuery()
     }
 
     // Resolución asíncrona
-    if (dns.status == 1) {
+    if (dns.status == DnsStatus::InProgress) {
         // Ya hay una query en curso
         setError();
         return;
     }
 
-    dns.status = 1; // in_progress
+    dns.status = DnsStatus::InProgress; // in_progress
     dns.resolvedIP = 0;
     dns.errorCode = 0;
 
@@ -487,12 +487,12 @@ void UnapiNet::cmdDnsQuery()
             // so bytes extract as octets: (ip>>24)=first, (ip>>0)=last
             dns.resolvedIP = ntohl(addr4->sin_addr.s_addr);
             dns.errorCode = 0;
-            dns.status = 2; // complete
+            dns.status = DnsStatus::Complete; // complete
             freeaddrinfo(res);
         } else {
             if (res) freeaddrinfo(res);
             dns.errorCode = 3; // host name does not exist
-            dns.status = 3; // error
+            dns.status = DnsStatus::Error; // error
         }
     });
 
@@ -511,15 +511,15 @@ void UnapiNet::cmdDnsQuery()
 
 void UnapiNet::cmdDnsStatus()
 {
-    int s = dns.status.load();
+    auto s = dns.status.load();
 
-    if (s == 2) {
+    if (s == DnsStatus::Complete) {
         // Completo
         DnsStatusResult r{};
         r.status = 2;
         r.ip     = dns.resolvedIP;
         setResult(r);
-    } else if (s == 3) {
+    } else if (s == DnsStatus::Error) {
         // Error
         DnsStatusError r{};
         r.status    = 0xFF;
@@ -637,7 +637,7 @@ void UnapiNet::cmdTcpOpen()
         }
     }
 
-    c.closeReason = 0;
+    c.closeReason = CloseReason::None;
     c.resident    = resident;
     {
         std::scoped_lock lock(c.mutex);
@@ -688,7 +688,7 @@ void UnapiNet::cmdTcpSend()
         auto n = sock_send(c.sock, data + sent, len - sent);
         if (n <= 0) {
             c.tcpState    = TCP_CLOSED;
-            c.closeReason = 4;
+            c.closeReason = CloseReason::ConnectionReset;
             sock_close(c.sock);
             c.sock = OPENMSX_INVALID_SOCKET;
             setResultByte(1);
@@ -763,7 +763,7 @@ void UnapiNet::cmdTcpClose()
         // Cerrar todas las conexiones transient
         for (int i = 0; i < MAX_TCP; i++) {
             if (!tcp[i].resident && tcp[i].sock != OPENMSX_INVALID_SOCKET) {
-                tcp[i].closeReason = 2; // closed via TCPIP_TCP_CLOSE
+                tcp[i].closeReason = CloseReason::ClosedByUser;
                 closeTcpSocket(i + 1);
             }
         }
@@ -790,7 +790,7 @@ void UnapiNet::cmdTcpClose()
 #else
     shutdown(c.sock, SHUT_WR);
 #endif
-    c.closeReason = 2;
+    c.closeReason = CloseReason::ClosedByUser;
     c.tcpState = TCP_CLOSE_WAIT;
 
     setResultByte(0);
@@ -807,7 +807,7 @@ void UnapiNet::cmdTcpClose()
 void UnapiNet::cmdTcpState()
 {
     TcpStateResult r{};
-    r.closeReason = 1; // default when no/invalid handle
+    r.closeReason = static_cast<uint8_t>(CloseReason::NeverUsed); // default: no/invalid handle
 
     if (!paramBuf.empty()) {
         int h = paramBuf[0];
@@ -821,7 +821,7 @@ void UnapiNet::cmdTcpState()
             }
             r.state       = c.tcpState;
             r.avail       = avail;
-            r.closeReason = c.closeReason;
+            r.closeReason = static_cast<uint8_t>(c.closeReason);
             r.remoteIp    = c.remoteIP;
             r.remotePort  = c.remotePort;
             r.localPort   = c.localPort;
@@ -849,7 +849,7 @@ void UnapiNet::cmdTcpAbort()
         return;
     }
 
-    tcp[h - 1].closeReason = 3; // aborted via TCPIP_TCP_ABORT
+    tcp[h - 1].closeReason = CloseReason::Aborted;
     closeTcpSocket(h);
     setResultByte(0);
 }

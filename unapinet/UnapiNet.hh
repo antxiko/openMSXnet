@@ -102,10 +102,16 @@ private:
         TCP_TIME_WAIT   = 10,
     };
 
+    // Wire-defined TCP close-reason codes (read back by the UNAPI TSR).
+    enum class CloseReason : uint8_t {
+        None = 0, NeverUsed = 1, ClosedByUser = 2,
+        Aborted = 3, ConnectionReset = 4, ConnectFailed = 6,
+    };
+
     struct TcpConnection {
         SOCKET sock = OPENMSX_INVALID_SOCKET;
         std::atomic<uint8_t> tcpState{TCP_CLOSED};
-        uint8_t  closeReason = 1;   // 1 = never used
+        CloseReason closeReason = CloseReason::NeverUsed;
         bool     resident = false;
         uint32_t remoteIP = 0;
         uint16_t remotePort = 0;
@@ -156,8 +162,9 @@ private:
     } icmpRequest;
 
     // --- DNS asíncrono ---
+    enum class DnsStatus : uint8_t { Idle = 0, InProgress = 1, Complete = 2, Error = 3 };
     struct {
-        std::atomic<int> status{0}; // 0=idle 1=in_progress 2=complete 3=error
+        std::atomic<DnsStatus> status{DnsStatus::Idle};
         uint32_t resolvedIP = 0;
         uint8_t  errorCode = 0;
     } dns;
