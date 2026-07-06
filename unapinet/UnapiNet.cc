@@ -24,9 +24,7 @@
 #include <chrono>
 #include <cstring>
 
-// Helper para convertir entre intptr_t (header) y SOCKET (socket API)
-#define SOCK(x) static_cast<SOCKET>(x)
-#define ISOCK(x) static_cast<intptr_t>(x)
+// Socket handles are openMSX SOCKET values (see Socket.hh); no casts needed.
 
 // ============================================================
 //  UnapiNet  –  openMSX Extension  (Phase 2)
@@ -196,7 +194,7 @@ void UnapiNet::setError()
 int UnapiNet::allocTcpHandle()
 {
     for (int i = 0; i < MAX_TCP; i++) {
-        if (tcp[i].sock == INVALID_SOCK &&
+        if (tcp[i].sock == OPENMSX_INVALID_SOCKET &&
             tcp[i].tcpState == TCP_CLOSED) {
             return i + 1; // handles 1-based
         }
@@ -208,9 +206,9 @@ void UnapiNet::closeTcpSocket(int h)
 {
     if (h < 1 || h > MAX_TCP) return;
     auto& c = tcp[h - 1];
-    if (c.sock != INVALID_SOCK) {
+    if (c.sock != OPENMSX_INVALID_SOCKET) {
         sock_close(static_cast<SOCKET>(c.sock));
-        c.sock = INVALID_SOCK;
+        c.sock = OPENMSX_INVALID_SOCKET;
     }
     c.tcpState   = TCP_CLOSED;
     c.connecting  = false;
@@ -239,9 +237,9 @@ void UnapiNet::closeAllConnections()
 //  Socket helpers
 // ============================================================
 
-void UnapiNet::setNonBlocking(intptr_t s)
+void UnapiNet::setNonBlocking(SOCKET s)
 {
-    SOCKET sd = SOCK(s);
+    SOCKET sd = s;
 #ifdef _WIN32
     u_long mode = 1;
     ioctlsocket(sd, FIONBIO, &mode);
@@ -295,9 +293,9 @@ void UnapiNet::receiverLoop()
 
         for (int i = 0; i < MAX_TCP; i++) {
             auto& c = tcp[i];
-            if (c.sock == INVALID_SOCK) continue;
+            if (c.sock == OPENMSX_INVALID_SOCKET) continue;
 
-            SOCKET sd = SOCK(c.sock);
+            SOCKET sd = c.sock;
 
             // --- Listening socket: accept non-blocking ---
             if (c.tcpState == TCP_LISTEN) {
@@ -320,11 +318,11 @@ void UnapiNet::receiverLoop()
                 }
                 // Replace listening socket with accepted socket
                 sock_close(sd);
-                setNonBlocking(ISOCK(a));
+                setNonBlocking(a);
                 int one = 1;
                 setsockopt(a, IPPROTO_TCP, TCP_NODELAY,
                            reinterpret_cast<const char*>(&one), sizeof(one));
-                c.sock = ISOCK(a);
+                c.sock = a;
                 c.tcpState = TCP_ESTABLISHED;
                 c.remoteIP = peerIP;
                 c.remotePort = ntohs(peer.sin_port);
@@ -348,7 +346,7 @@ void UnapiNet::receiverLoop()
                         c.closeReason = 6;
                         c.connecting  = false;
                         sock_close(sd);
-                        c.sock = INVALID_SOCK;
+                        c.sock = OPENMSX_INVALID_SOCKET;
                     } else if (FD_ISSET(sd, &wfds)) {
                         int err = 0;
                         ::socklen_t elen = sizeof(err);
@@ -362,7 +360,7 @@ void UnapiNet::receiverLoop()
                             c.closeReason = 6;
                             c.connecting  = false;
                             sock_close(sd);
-                            c.sock = INVALID_SOCK;
+                            c.sock = OPENMSX_INVALID_SOCKET;
                         }
                     }
                 }
@@ -399,14 +397,14 @@ void UnapiNet::receiverLoop()
                 c.tcpState    = TCP_CLOSED;
                 c.closeReason = 4;
                 sock_close(sd);
-                c.sock = INVALID_SOCK;
+                c.sock = OPENMSX_INVALID_SOCKET;
             }
         }
 
         // --- Poll UDP sockets for incoming datagrams ---
         for (int i = 0; i < MAX_UDP; i++) {
             auto& u = udp[i];
-            if (u.sock == INVALID_SOCK) continue;
+            if (u.sock == OPENMSX_INVALID_SOCKET) continue;
 
             SOCKET sd = static_cast<SOCKET>(u.sock);
             fd_set rfds;
@@ -650,7 +648,7 @@ void UnapiNet::cmdTcpOpen()
     int one = 1;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
                reinterpret_cast<const char*>(&one), sizeof(one));
-    setNonBlocking(ISOCK(s));
+    setNonBlocking(s);
 
     if (passive) {
         // Passive: bind to local port, then listen
@@ -676,7 +674,7 @@ void UnapiNet::cmdTcpOpen()
             setResultByte(0);
             return;
         }
-        c.sock       = ISOCK(s);
+        c.sock       = s;
         c.tcpState   = TCP_LISTEN;
         c.connecting = false;
 
@@ -698,7 +696,7 @@ void UnapiNet::cmdTcpOpen()
         dest.sin_addr.s_addr = htonl(ip);
         int ret = connect(s, reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
         if (ret == 0) {
-            c.sock       = ISOCK(s);
+            c.sock       = s;
             c.tcpState   = TCP_ESTABLISHED;
             c.connecting = false;
         } else {
@@ -708,7 +706,7 @@ void UnapiNet::cmdTcpOpen()
 #else
             if (errno == EINPROGRESS) {
 #endif
-                c.sock       = ISOCK(s);
+                c.sock       = s;
                 c.tcpState   = TCP_SYN_SENT;
                 c.connecting = true;
             } else {
@@ -761,7 +759,7 @@ void UnapiNet::cmdTcpSend()
     }
 
     auto& c = tcp[h - 1];
-    if (c.sock == INVALID_SOCK ||
+    if (c.sock == OPENMSX_INVALID_SOCKET ||
         (c.tcpState != TCP_ESTABLISHED && c.tcpState != TCP_CLOSE_WAIT)) {
         setResultByte(1);
         return;
@@ -776,12 +774,12 @@ void UnapiNet::cmdTcpSend()
     const char* data = reinterpret_cast<const char*>(paramBuf.data() + sizeof(TcpSendParamHeader));
     size_t sent = 0;
     while (sent < len) {
-        auto n = sock_send(SOCK(c.sock), data + sent, len - sent);
+        auto n = sock_send(c.sock, data + sent, len - sent);
         if (n <= 0) {
             c.tcpState    = TCP_CLOSED;
             c.closeReason = 4;
-            sock_close(SOCK(c.sock));
-            c.sock = INVALID_SOCK;
+            sock_close(c.sock);
+            c.sock = OPENMSX_INVALID_SOCKET;
             setResultByte(1);
             return;
         }
@@ -853,7 +851,7 @@ void UnapiNet::cmdTcpClose()
     if (h == 0) {
         // Cerrar todas las conexiones transient
         for (int i = 0; i < MAX_TCP; i++) {
-            if (!tcp[i].resident && tcp[i].sock != INVALID_SOCK) {
+            if (!tcp[i].resident && tcp[i].sock != OPENMSX_INVALID_SOCKET) {
                 tcp[i].closeReason = 2; // closed via TCPIP_TCP_CLOSE
                 closeTcpSocket(i + 1);
             }
@@ -868,7 +866,7 @@ void UnapiNet::cmdTcpClose()
     }
 
     auto& c = tcp[h - 1];
-    if (c.sock == INVALID_SOCK) {
+    if (c.sock == OPENMSX_INVALID_SOCKET) {
         setResultByte(1);
         return;
     }
@@ -877,9 +875,9 @@ void UnapiNet::cmdTcpClose()
     // and do the actual socket cleanup. Calling sock_close here can
     // deadlock with the recv thread on Windows.
 #ifdef _WIN32
-    shutdown(SOCK(c.sock), SD_SEND);
+    shutdown(c.sock, SD_SEND);
 #else
-    shutdown(SOCK(c.sock), SHUT_WR);
+    shutdown(c.sock, SHUT_WR);
 #endif
     c.closeReason = 2;
     c.tcpState = TCP_CLOSE_WAIT;
@@ -935,7 +933,7 @@ void UnapiNet::cmdTcpAbort()
     }
 
     int h = paramBuf[0];
-    if (h < 1 || h > MAX_TCP || tcp[h - 1].sock == INVALID_SOCK) {
+    if (h < 1 || h > MAX_TCP || tcp[h - 1].sock == OPENMSX_INVALID_SOCKET) {
         setResultByte(1);
         return;
     }
@@ -977,7 +975,7 @@ void UnapiNet::cmdNetState()
 int UnapiNet::allocUdpHandle()
 {
     for (int i = 0; i < MAX_UDP; i++) {
-        if (udp[i].sock == INVALID_SOCK) {
+        if (udp[i].sock == OPENMSX_INVALID_SOCKET) {
             return i + 1;
         }
     }
@@ -988,9 +986,9 @@ void UnapiNet::closeUdpSocket(int h)
 {
     if (h < 1 || h > MAX_UDP) return;
     auto& u = udp[h - 1];
-    if (u.sock != INVALID_SOCK) {
+    if (u.sock != OPENMSX_INVALID_SOCKET) {
         sock_close(static_cast<SOCKET>(u.sock));
-        u.sock = INVALID_SOCK;
+        u.sock = OPENMSX_INVALID_SOCKET;
     }
     u.localPort = 0;
     u.resident = false;
@@ -1027,7 +1025,7 @@ void UnapiNet::cmdUdpOpen()
         return;
     }
 
-    setNonBlocking(ISOCK(s));
+    setNonBlocking(s);
 
     // Enable broadcast — required by UNAPI clients that do LAN service
     // discovery via sendto(255.255.255.255). Real-hardware UNAPI stacks
@@ -1063,7 +1061,7 @@ void UnapiNet::cmdUdpOpen()
         u.localPort = localPort;
     }
 
-    u.sock = ISOCK(s);
+    u.sock = s;
     u.resident = false;
     {
         std::scoped_lock lock(u.mutex);
@@ -1089,7 +1087,7 @@ void UnapiNet::cmdUdpClose()
 
     if (h == 0) {
         for (int i = 0; i < MAX_UDP; i++) {
-            if (!udp[i].resident && udp[i].sock != INVALID_SOCK) {
+            if (!udp[i].resident && udp[i].sock != OPENMSX_INVALID_SOCKET) {
                 closeUdpSocket(i + 1);
             }
         }
@@ -1097,7 +1095,7 @@ void UnapiNet::cmdUdpClose()
         return;
     }
 
-    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == INVALID_SOCK) {
+    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == OPENMSX_INVALID_SOCKET) {
         setResultByte(1);
         return;
     }
@@ -1116,7 +1114,7 @@ void UnapiNet::cmdUdpState()
     uint16_t size = 0;
     if (!paramBuf.empty()) {
         int h = paramBuf[0];
-        if (h >= 1 && h <= MAX_UDP && udp[h - 1].sock != INVALID_SOCK) {
+        if (h >= 1 && h <= MAX_UDP && udp[h - 1].sock != OPENMSX_INVALID_SOCKET) {
             auto& u = udp[h - 1];
             std::scoped_lock lock(u.mutex);
             if (!u.recvQueue.empty()) {
@@ -1145,7 +1143,7 @@ void UnapiNet::cmdUdpSend()
     }
     auto ph = fromBytes<UdpSendParamHeader>(paramBuf);
     int h = ph.handle;
-    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == INVALID_SOCK) {
+    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == OPENMSX_INVALID_SOCKET) {
         setResultByte(1);
         return;
     }
@@ -1188,7 +1186,7 @@ void UnapiNet::cmdUdpRecv()
     int h = p.handle;
     uint16_t maxlen = p.maxlen;
 
-    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == INVALID_SOCK) {
+    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == OPENMSX_INVALID_SOCKET) {
         setResult(UdpRecvResultHeader{}, std::span<const uint8_t>{});
         return;
     }

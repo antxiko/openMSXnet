@@ -2,6 +2,10 @@
 #define UNAPINET_HH
 
 #include "MSXDevice.hh"
+#include "Socket.hh"
+#ifdef interface
+#undef interface  // winsock2.h (pulled in by Socket.hh) #defines `interface`;
+#endif            // undo it so it can't clobber other openMSX headers.
 #include "UnapiNetWire.hh"
 
 #include <atomic>
@@ -18,8 +22,6 @@
 //  Puertos I/O 0x28 (cmd/status) y 0x29 (data). Mismo rango que el
 //  DenYoNet — ambos son bridges UNAPI Ethernet y no coexisten.
 //  Bridge entre MSX y sockets BSD del host.
-//  No incluimos Socket.hh aquí para evitar conflicto con
-//  la macro "interface" de windows.h.
 // ============================================================
 
 namespace openmsx {
@@ -96,13 +98,8 @@ private:
         TCP_TIME_WAIT   = 10,
     };
 
-    // Usamos intptr_t en vez de SOCKET para evitar incluir
-    // winsock2.h en el header (conflicto con macro "interface").
-    // El cast real se hace en el .cc.
-    static constexpr intptr_t INVALID_SOCK = -1;
-
     struct TcpConnection {
-        intptr_t sock = INVALID_SOCK;
+        SOCKET sock = OPENMSX_INVALID_SOCKET;
         std::atomic<uint8_t> tcpState{TCP_CLOSED};
         uint8_t  closeReason = 1;   // 1 = never used
         bool     resident = false;
@@ -125,7 +122,7 @@ private:
     };
 
     struct UdpConnection {
-        intptr_t sock = INVALID_SOCK;
+        SOCKET sock = OPENMSX_INVALID_SOCKET;
         uint16_t localPort = 0;
         bool     resident = false;
         std::deque<UdpDatagram> recvQueue;
@@ -224,7 +221,7 @@ private:
     void closeUdpSocket(int h);
     void closeAllConnections();
 
-    static void setNonBlocking(intptr_t s);
+    static void setNonBlocking(SOCKET s);
     static uint32_t getHostLocalIP();
 };
 
