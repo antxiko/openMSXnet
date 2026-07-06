@@ -2,6 +2,7 @@
 #define UNAPINET_HH
 
 #include "MSXDevice.hh"
+#include "UnapiNetWire.hh"
 
 #include <atomic>
 #include <cstdint>
@@ -194,6 +195,28 @@ private:
     void setResultVec(const std::vector<uint8_t>& v);
     void setResultByte(uint8_t b);
     void setError();
+
+    // Serialize a wire-layout struct (an Endian::UA_* record from
+    // UnapiNetWire.hh) straight into the result buffer, replacing manual
+    // byte packing. The compiler lays out the exact on-wire bytes.
+    template<wire_layout T>
+    void setResult(const T& d)
+    {
+        auto bytes = toBytes(d);
+        setResult(bytes.data(), bytes.size());
+    }
+    // Fixed-size header struct followed by a variable payload
+    // (used by TCP_RECV / UDP_RECV).
+    template<wire_layout T>
+    void setResult(const T& hdr, std::span<const uint8_t> payload)
+    {
+        auto h = toBytes(hdr);
+        resultBuf.assign(h.begin(), h.end());
+        resultBuf.insert(resultBuf.end(), payload.begin(), payload.end());
+        resultPos = 0;
+        state     = State::RESULT_READY;
+        statusReg = STATUS_DATA;
+    }
 
     int  allocTcpHandle();
     void closeTcpSocket(int h);

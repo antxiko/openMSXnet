@@ -485,8 +485,10 @@ void UnapiNet::cmdPing()
 
 void UnapiNet::cmdQueryCap()
 {
-    uint8_t buf[2] = {CAP_BYTE0, CAP_BYTE1};
-    setResult(buf, 2);
+    QueryCapResult r{};
+    r.cap0 = CAP_BYTE0;
+    r.cap1 = CAP_BYTE1;
+    setResult(r);
 }
 
 // ============================================================
@@ -528,13 +530,10 @@ void UnapiNet::cmdDnsQuery()
         dns.status = 2; // complete
         dns.errorCode = 0;
 
-        uint8_t res[5];
-        res[0] = 1; // resuelto inmediatamente
-        res[1] = static_cast<uint8_t>((ip >> 24) & 0xFF);
-        res[2] = static_cast<uint8_t>((ip >> 16) & 0xFF);
-        res[3] = static_cast<uint8_t>((ip >>  8) & 0xFF);
-        res[4] = static_cast<uint8_t>((ip >>  0) & 0xFF);
-        setResult(res, 5);
+        DnsQueryResult r{};
+        r.status = 1; // resuelto inmediatamente
+        r.ip     = ip;
+        setResult(r);
         return;
     }
 
@@ -596,20 +595,16 @@ void UnapiNet::cmdDnsStatus()
 
     if (s == 2) {
         // Completo
-        uint32_t ip = dns.resolvedIP;
-        uint8_t res[5];
-        res[0] = 2;
-        res[1] = static_cast<uint8_t>((ip >> 24) & 0xFF);
-        res[2] = static_cast<uint8_t>((ip >> 16) & 0xFF);
-        res[3] = static_cast<uint8_t>((ip >>  8) & 0xFF);
-        res[4] = static_cast<uint8_t>((ip >>  0) & 0xFF);
-        setResult(res, 5);
+        DnsStatusResult r{};
+        r.status = 2;
+        r.ip     = dns.resolvedIP;
+        setResult(r);
     } else if (s == 3) {
         // Error
-        uint8_t res[2];
-        res[0] = 0xFF;
-        res[1] = dns.errorCode;
-        setResult(res, 2);
+        DnsStatusError r{};
+        r.status    = 0xFF;
+        r.errorCode = dns.errorCode;
+        setResult(r);
     } else {
         // idle (0) o in_progress (1)
         setResultByte(static_cast<uint8_t>(s));
@@ -809,9 +804,7 @@ void UnapiNet::cmdTcpSend()
 void UnapiNet::cmdTcpRecv()
 {
     if (paramBuf.size() < 3) {
-        // Devolver 0 bytes
-        uint8_t res[2] = {0, 0};
-        setResult(res, 2);
+        setResult(TcpRecvResultHeader{}, std::span<const uint8_t>{}); // 0 bytes
         return;
     }
 
@@ -820,8 +813,7 @@ void UnapiNet::cmdTcpRecv()
                       (static_cast<uint16_t>(paramBuf[2]) << 8);
 
     if (h < 1 || h > MAX_TCP) {
-        uint8_t res[2] = {0, 0};
-        setResult(res, 2);
+        setResult(TcpRecvResultHeader{}, std::span<const uint8_t>{});
         return;
     }
 
@@ -830,26 +822,21 @@ void UnapiNet::cmdTcpRecv()
     // Limitar al máximo de transferencia
     if (maxlen > MAX_TRANSFER) maxlen = static_cast<uint16_t>(MAX_TRANSFER);
 
-    std::vector<uint8_t> result;
-    result.reserve(2 + maxlen);
-    result.push_back(0); // placeholder len low
-    result.push_back(0); // placeholder len high
-
+    std::vector<uint8_t> payload;
+    payload.reserve(maxlen);
     {
         std::scoped_lock lock(c.mutex);
         uint16_t avail = static_cast<uint16_t>(
             std::min(static_cast<size_t>(maxlen), c.recvBuf.size()));
-
         for (uint16_t i = 0; i < avail; i++) {
-            result.push_back(c.recvBuf.front());
+            payload.push_back(c.recvBuf.front());
             c.recvBuf.pop_front();
         }
-
-        result[0] = static_cast<uint8_t>(avail & 0xFF);
-        result[1] = static_cast<uint8_t>((avail >> 8) & 0xFF);
     }
 
-    setResultVec(result);
+    TcpRecvResultHeader hdr{};
+    hdr.actualLen = static_cast<uint16_t>(payload.size());
+    setResult(hdr, payload);
 }
 
 // ============================================================
@@ -914,7 +901,8 @@ void UnapiNet::cmdTcpClose()
 
 void UnapiNet::cmdTcpState()
 {
-    uint8_t res[12] = {TCP_CLOSED, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+    TcpStateResult r{};
+    r.closeReason = 1; // default when no/invalid handle
 
     if (!paramBuf.empty()) {
         int h = paramBuf[0];
@@ -926,21 +914,15 @@ void UnapiNet::cmdTcpState()
                 avail = static_cast<uint16_t>(
                     std::min(c.recvBuf.size(), static_cast<size_t>(0xFFFF)));
             }
-            res[0] = static_cast<uint8_t>(c.tcpState);
-            res[1] = static_cast<uint8_t>(avail & 0xFF);
-            res[2] = static_cast<uint8_t>((avail >> 8) & 0xFF);
-            res[3] = c.closeReason;
-            res[4] = static_cast<uint8_t>((c.remoteIP >> 24) & 0xFF);
-            res[5] = static_cast<uint8_t>((c.remoteIP >> 16) & 0xFF);
-            res[6] = static_cast<uint8_t>((c.remoteIP >>  8) & 0xFF);
-            res[7] = static_cast<uint8_t>((c.remoteIP >>  0) & 0xFF);
-            res[8] = static_cast<uint8_t>(c.remotePort & 0xFF);
-            res[9] = static_cast<uint8_t>((c.remotePort >> 8) & 0xFF);
-            res[10] = static_cast<uint8_t>(c.localPort & 0xFF);
-            res[11] = static_cast<uint8_t>((c.localPort >> 8) & 0xFF);
+            r.state       = c.tcpState;
+            r.avail       = avail;
+            r.closeReason = c.closeReason;
+            r.remoteIp    = c.remoteIP;
+            r.remotePort  = c.remotePort;
+            r.localPort   = c.localPort;
         }
     }
-    setResult(res, 12);
+    setResult(r);
 }
 
 // ============================================================
@@ -975,13 +957,9 @@ void UnapiNet::cmdTcpAbort()
 
 void UnapiNet::cmdGetLocalIP()
 {
-    uint32_t ip = getHostLocalIP();
-    uint8_t res[4];
-    res[0] = static_cast<uint8_t>((ip >> 24) & 0xFF);
-    res[1] = static_cast<uint8_t>((ip >> 16) & 0xFF);
-    res[2] = static_cast<uint8_t>((ip >>  8) & 0xFF);
-    res[3] = static_cast<uint8_t>((ip >>  0) & 0xFF);
-    setResult(res, 4);
+    GetLocalIpResult r{};
+    r.ip = getHostLocalIP();
+    setResult(r);
 }
 
 // ============================================================
@@ -1153,11 +1131,9 @@ void UnapiNet::cmdUdpState()
             }
         }
     }
-    uint8_t res[2] = {
-        static_cast<uint8_t>(size & 0xFF),
-        static_cast<uint8_t>((size >> 8) & 0xFF)
-    };
-    setResult(res, 2);
+    UdpStateResult r{};
+    r.firstDgramSize = size;
+    setResult(r);
 }
 
 // ============================================================
@@ -1214,8 +1190,7 @@ void UnapiNet::cmdUdpSend()
 void UnapiNet::cmdUdpRecv()
 {
     if (paramBuf.size() < 3) {
-        uint8_t res[8] = {0};
-        setResult(res, 8);
+        setResult(UdpRecvResultHeader{}, std::span<const uint8_t>{});
         return;
     }
     int h = paramBuf[0];
@@ -1223,8 +1198,7 @@ void UnapiNet::cmdUdpRecv()
                       (static_cast<uint16_t>(paramBuf[2]) << 8);
 
     if (h < 1 || h > MAX_UDP || udp[h - 1].sock == INVALID_SOCK) {
-        uint8_t res[8] = {0};
-        setResult(res, 8);
+        setResult(UdpRecvResultHeader{}, std::span<const uint8_t>{});
         return;
     }
     auto& u = udp[h - 1];
@@ -1241,28 +1215,18 @@ void UnapiNet::cmdUdpRecv()
     }
 
     if (!haveDg) {
-        uint8_t res[8] = {0};
-        setResult(res, 8);
+        setResult(UdpRecvResultHeader{}, std::span<const uint8_t>{});
         return;
     }
 
     uint16_t actual = static_cast<uint16_t>(
         std::min(static_cast<size_t>(maxlen), dg.data.size()));
 
-    std::vector<uint8_t> result;
-    result.reserve(8 + actual);
-    result.push_back(static_cast<uint8_t>((dg.srcIP >> 24) & 0xFF));
-    result.push_back(static_cast<uint8_t>((dg.srcIP >> 16) & 0xFF));
-    result.push_back(static_cast<uint8_t>((dg.srcIP >>  8) & 0xFF));
-    result.push_back(static_cast<uint8_t>((dg.srcIP >>  0) & 0xFF));
-    result.push_back(static_cast<uint8_t>(dg.srcPort & 0xFF));
-    result.push_back(static_cast<uint8_t>((dg.srcPort >> 8) & 0xFF));
-    result.push_back(static_cast<uint8_t>(actual & 0xFF));
-    result.push_back(static_cast<uint8_t>((actual >> 8) & 0xFF));
-    for (uint16_t i = 0; i < actual; i++) {
-        result.push_back(dg.data[i]);
-    }
-    setResultVec(result);
+    UdpRecvResultHeader hdr{};
+    hdr.srcIp     = dg.srcIP;
+    hdr.srcPort   = dg.srcPort;
+    hdr.actualLen = actual;
+    setResult(hdr, std::span<const uint8_t>(dg.data.data(), actual));
 }
 
 // ============================================================
@@ -1404,20 +1368,14 @@ void UnapiNet::cmdIcmpRecv()
         return;
     }
 
-    uint8_t res[12];
-    res[0] = 1; // has data
-    res[1] = static_cast<uint8_t>((r.srcIP >> 24) & 0xFF);
-    res[2] = static_cast<uint8_t>((r.srcIP >> 16) & 0xFF);
-    res[3] = static_cast<uint8_t>((r.srcIP >>  8) & 0xFF);
-    res[4] = static_cast<uint8_t>((r.srcIP >>  0) & 0xFF);
-    res[5] = r.ttl;
-    res[6] = static_cast<uint8_t>(r.identifier & 0xFF);
-    res[7] = static_cast<uint8_t>((r.identifier >> 8) & 0xFF);
-    res[8] = static_cast<uint8_t>(r.sequence & 0xFF);
-    res[9] = static_cast<uint8_t>((r.sequence >> 8) & 0xFF);
-    res[10] = static_cast<uint8_t>(r.dataLen & 0xFF);
-    res[11] = static_cast<uint8_t>((r.dataLen >> 8) & 0xFF);
-    setResult(res, 12);
+    IcmpRecvResult out{};
+    out.hasData    = 1;
+    out.srcIp      = r.srcIP;
+    out.ttl        = r.ttl;
+    out.identifier = r.identifier;
+    out.sequence   = r.sequence;
+    out.dataLen    = r.dataLen;
+    setResult(out);
 }
 
 // ============================================================

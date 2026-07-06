@@ -29,7 +29,8 @@ cd "${OPENMSX_DIR}"
 # Stage the extension sources. openMSX auto-discovers src/*/ subdirs in
 # build/main.mk via `find src -type d`, so no makefile registration needed.
 mkdir -p src/unapinet share/extensions
-cp "${ROOT}/unapinet/UnapiNet.hh" "${ROOT}/unapinet/UnapiNet.cc" src/unapinet/
+cp "${ROOT}/unapinet/UnapiNet.hh" "${ROOT}/unapinet/UnapiNet.cc" \
+   "${ROOT}/unapinet/UnapiNetWire.hh" src/unapinet/
 cp "${ROOT}/unapinet/unapinet.xml" share/extensions/
 
 # Register the device class in DeviceFactory.cc (idempotent).
