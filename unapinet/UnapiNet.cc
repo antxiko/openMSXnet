@@ -620,20 +620,16 @@ void UnapiNet::cmdDnsStatus()
 
 void UnapiNet::cmdTcpOpen()
 {
-    if (paramBuf.size() < 11) {
+    if (paramBuf.size() < sizeof(TcpOpenParams)) {
         setResultByte(0);
         return;
     }
 
-    uint32_t ip = (static_cast<uint32_t>(paramBuf[0]) << 24) |
-                  (static_cast<uint32_t>(paramBuf[1]) << 16) |
-                  (static_cast<uint32_t>(paramBuf[2]) <<  8) |
-                  (static_cast<uint32_t>(paramBuf[3]) <<  0);
-    uint16_t remotePort = static_cast<uint16_t>(paramBuf[4]) |
-                          (static_cast<uint16_t>(paramBuf[5]) << 8);
-    uint16_t localPortReq = static_cast<uint16_t>(paramBuf[6]) |
-                            (static_cast<uint16_t>(paramBuf[7]) << 8);
-    uint8_t flags = paramBuf[10];
+    auto p = fromBytes<TcpOpenParams>(paramBuf);
+    uint32_t ip           = p.remoteIp;
+    uint16_t remotePort   = p.remotePort;
+    uint16_t localPortReq = p.localPort;
+    uint8_t  flags        = p.flags;
     bool passive  = (flags & 0x01) != 0;
     bool resident = (flags & 0x02) != 0;
 
@@ -750,14 +746,14 @@ void UnapiNet::cmdTcpOpen()
 
 void UnapiNet::cmdTcpSend()
 {
-    if (paramBuf.size() < 3) {
+    if (paramBuf.size() < sizeof(TcpSendParamHeader)) {
         setResultByte(1);
         return;
     }
 
-    int h = paramBuf[0];
-    uint16_t len = static_cast<uint16_t>(paramBuf[1]) |
-                   (static_cast<uint16_t>(paramBuf[2]) << 8);
+    auto ph = fromBytes<TcpSendParamHeader>(paramBuf);
+    int h = ph.handle;
+    uint16_t len = ph.len;
 
     if (h < 1 || h > MAX_TCP) {
         setResultByte(1);
@@ -771,13 +767,13 @@ void UnapiNet::cmdTcpSend()
         return;
     }
 
-    if (paramBuf.size() < static_cast<size_t>(3 + len)) {
+    if (paramBuf.size() < sizeof(TcpSendParamHeader) + len) {
         setResultByte(1);
         return;
     }
 
     // Enviar datos
-    const char* data = reinterpret_cast<const char*>(paramBuf.data() + 3);
+    const char* data = reinterpret_cast<const char*>(paramBuf.data() + sizeof(TcpSendParamHeader));
     size_t sent = 0;
     while (sent < len) {
         auto n = sock_send(SOCK(c.sock), data + sent, len - sent);
@@ -803,14 +799,14 @@ void UnapiNet::cmdTcpSend()
 
 void UnapiNet::cmdTcpRecv()
 {
-    if (paramBuf.size() < 3) {
+    if (paramBuf.size() < sizeof(TcpRecvParams)) {
         setResult(TcpRecvResultHeader{}, std::span<const uint8_t>{}); // 0 bytes
         return;
     }
 
-    int h = paramBuf[0];
-    uint16_t maxlen = static_cast<uint16_t>(paramBuf[1]) |
-                      (static_cast<uint16_t>(paramBuf[2]) << 8);
+    auto p = fromBytes<TcpRecvParams>(paramBuf);
+    int h = p.handle;
+    uint16_t maxlen = p.maxlen;
 
     if (h < 1 || h > MAX_TCP) {
         setResult(TcpRecvResultHeader{}, std::span<const uint8_t>{});
@@ -1012,12 +1008,11 @@ void UnapiNet::closeUdpSocket(int h)
 
 void UnapiNet::cmdUdpOpen()
 {
-    if (paramBuf.size() < 2) {
+    if (paramBuf.size() < sizeof(UdpOpenParams)) {
         setResultByte(0);
         return;
     }
-    uint16_t localPort = static_cast<uint16_t>(paramBuf[0]) |
-                         (static_cast<uint16_t>(paramBuf[1]) << 8);
+    uint16_t localPort = fromBytes<UdpOpenParams>(paramBuf).localPort;
 
     int h = allocUdpHandle();
     if (h == 0) {
@@ -1144,27 +1139,23 @@ void UnapiNet::cmdUdpState()
 
 void UnapiNet::cmdUdpSend()
 {
-    if (paramBuf.size() < 9) {
+    if (paramBuf.size() < sizeof(UdpSendParamHeader)) {
         setResultByte(1);
         return;
     }
-    int h = paramBuf[0];
+    auto ph = fromBytes<UdpSendParamHeader>(paramBuf);
+    int h = ph.handle;
     if (h < 1 || h > MAX_UDP || udp[h - 1].sock == INVALID_SOCK) {
         setResultByte(1);
         return;
     }
     auto& u = udp[h - 1];
 
-    uint32_t ip = (static_cast<uint32_t>(paramBuf[1]) << 24) |
-                  (static_cast<uint32_t>(paramBuf[2]) << 16) |
-                  (static_cast<uint32_t>(paramBuf[3]) <<  8) |
-                  (static_cast<uint32_t>(paramBuf[4]) <<  0);
-    uint16_t port = static_cast<uint16_t>(paramBuf[5]) |
-                    (static_cast<uint16_t>(paramBuf[6]) << 8);
-    uint16_t len = static_cast<uint16_t>(paramBuf[7]) |
-                   (static_cast<uint16_t>(paramBuf[8]) << 8);
+    uint32_t ip   = ph.destIp;
+    uint16_t port = ph.destPort;
+    uint16_t len  = ph.len;
 
-    if (paramBuf.size() < static_cast<size_t>(9 + len)) {
+    if (paramBuf.size() < sizeof(UdpSendParamHeader) + len) {
         setResultByte(1);
         return;
     }
@@ -1175,7 +1166,7 @@ void UnapiNet::cmdUdpSend()
     dest.sin_addr.s_addr = htonl(ip);
     dest.sin_port = htons(port);
 
-    const char* data = reinterpret_cast<const char*>(paramBuf.data() + 9);
+    const char* data = reinterpret_cast<const char*>(paramBuf.data() + sizeof(UdpSendParamHeader));
     int n = sendto(static_cast<SOCKET>(u.sock), data, len, 0,
                    reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
     setResultByte(n == len ? 0 : 1);
@@ -1189,13 +1180,13 @@ void UnapiNet::cmdUdpSend()
 
 void UnapiNet::cmdUdpRecv()
 {
-    if (paramBuf.size() < 3) {
+    if (paramBuf.size() < sizeof(UdpRecvParams)) {
         setResult(UdpRecvResultHeader{}, std::span<const uint8_t>{});
         return;
     }
-    int h = paramBuf[0];
-    uint16_t maxlen = static_cast<uint16_t>(paramBuf[1]) |
-                      (static_cast<uint16_t>(paramBuf[2]) << 8);
+    auto p = fromBytes<UdpRecvParams>(paramBuf);
+    int h = p.handle;
+    uint16_t maxlen = p.maxlen;
 
     if (h < 1 || h > MAX_UDP || udp[h - 1].sock == INVALID_SOCK) {
         setResult(UdpRecvResultHeader{}, std::span<const uint8_t>{});
@@ -1326,21 +1317,16 @@ void UnapiNet::icmpWorkerLoop()
 // Result: 1 byte status
 void UnapiNet::cmdIcmpSend()
 {
-    if (paramBuf.size() < 11) {
+    if (paramBuf.size() < sizeof(IcmpSendParams)) {
         setResultByte(1);
         return;
     }
-    icmpRequest.dstIP = (static_cast<uint32_t>(paramBuf[0]) << 24) |
-                       (static_cast<uint32_t>(paramBuf[1]) << 16) |
-                       (static_cast<uint32_t>(paramBuf[2]) <<  8) |
-                       (static_cast<uint32_t>(paramBuf[3]) <<  0);
-    icmpRequest.ttl        = paramBuf[4];
-    icmpRequest.identifier = static_cast<uint16_t>(paramBuf[5]) |
-                             (static_cast<uint16_t>(paramBuf[6]) << 8);
-    icmpRequest.sequence   = static_cast<uint16_t>(paramBuf[7]) |
-                             (static_cast<uint16_t>(paramBuf[8]) << 8);
-    icmpRequest.dataLen    = static_cast<uint16_t>(paramBuf[9]) |
-                             (static_cast<uint16_t>(paramBuf[10]) << 8);
+    auto p = fromBytes<IcmpSendParams>(paramBuf);
+    icmpRequest.dstIP      = p.dstIp;
+    icmpRequest.ttl        = p.ttl;
+    icmpRequest.identifier = p.identifier;
+    icmpRequest.sequence   = p.sequence;
+    icmpRequest.dataLen    = p.len;
     if (icmpRequest.dataLen > 512) icmpRequest.dataLen = 512;
 
     icmpPending = true;
