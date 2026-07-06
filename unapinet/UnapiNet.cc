@@ -190,10 +190,21 @@ int UnapiNet::allocTcpHandle()
     return 0; // no hay handles libres
 }
 
+UnapiNet::TcpConnection* UnapiNet::tcpForHandle(int h)
+{
+    return (h >= 1 && h <= MAX_TCP) ? &tcp[h - 1] : nullptr;
+}
+
+UnapiNet::UdpConnection* UnapiNet::udpForHandle(int h)
+{
+    return (h >= 1 && h <= MAX_UDP) ? &udp[h - 1] : nullptr;
+}
+
 void UnapiNet::closeTcpSocket(int h)
 {
-    if (h < 1 || h > MAX_TCP) return;
-    auto& c = tcp[h - 1];
+    auto* cp = tcpForHandle(h);
+    if (!cp) return;
+    auto& c = *cp;
     if (c.sock != OPENMSX_INVALID_SOCKET) {
         sock_close(static_cast<SOCKET>(c.sock));
         c.sock = OPENMSX_INVALID_SOCKET;
@@ -664,12 +675,12 @@ void UnapiNet::cmdTcpSend()
     int h = ph.handle;
     uint16_t len = ph.len;
 
-    if (h < 1 || h > MAX_TCP) {
+    auto* cp = tcpForHandle(h);
+    if (!cp) {
         setResultByte(1);
         return;
     }
-
-    auto& c = tcp[h - 1];
+    auto& c = *cp;
     if (c.sock == OPENMSX_INVALID_SOCKET ||
         (c.tcpState != TCP_ESTABLISHED && c.tcpState != TCP_CLOSE_WAIT)) {
         setResultByte(1);
@@ -714,12 +725,12 @@ void UnapiNet::cmdTcpRecv()
     int h = p.handle;
     uint16_t maxlen = p.maxlen;
 
-    if (h < 1 || h > MAX_TCP) {
+    auto* cp = tcpForHandle(h);
+    if (!cp) {
         setResult(TcpRecvResultHeader{}, std::span<const uint8_t>{});
         return;
     }
-
-    auto& c = tcp[h - 1];
+    auto& c = *cp;
 
     // Limitar al máximo de transferencia
     if (maxlen > MAX_TRANSFER) maxlen = static_cast<uint16_t>(MAX_TRANSFER);
@@ -768,12 +779,12 @@ void UnapiNet::cmdTcpClose()
         return;
     }
 
-    if (h < 1 || h > MAX_TCP) {
+    auto* cp = tcpForHandle(h);
+    if (!cp) {
         setResultByte(1);
         return;
     }
-
-    auto& c = tcp[h - 1];
+    auto& c = *cp;
     if (c.sock == OPENMSX_INVALID_SOCKET) {
         setResultByte(1);
         return;
@@ -808,8 +819,8 @@ void UnapiNet::cmdTcpState()
 
     if (!paramBuf.empty()) {
         int h = paramBuf[0];
-        if (h >= 1 && h <= MAX_TCP) {
-            auto& c = tcp[h - 1];
+        if (auto* cp = tcpForHandle(h)) {
+            auto& c = *cp;
             uint16_t avail;
             {
                 std::scoped_lock lock(c.mutex);
@@ -841,12 +852,13 @@ void UnapiNet::cmdTcpAbort()
     }
 
     int h = paramBuf[0];
-    if (h < 1 || h > MAX_TCP || tcp[h - 1].sock == OPENMSX_INVALID_SOCKET) {
+    auto* cp = tcpForHandle(h);
+    if (!cp || cp->sock == OPENMSX_INVALID_SOCKET) {
         setResultByte(1);
         return;
     }
 
-    tcp[h - 1].closeReason = CloseReason::Aborted;
+    cp->closeReason = CloseReason::Aborted;
     closeTcpSocket(h);
     setResultByte(0);
 }
@@ -892,8 +904,9 @@ int UnapiNet::allocUdpHandle()
 
 void UnapiNet::closeUdpSocket(int h)
 {
-    if (h < 1 || h > MAX_UDP) return;
-    auto& u = udp[h - 1];
+    auto* up = udpForHandle(h);
+    if (!up) return;
+    auto& u = *up;
     if (u.sock != OPENMSX_INVALID_SOCKET) {
         sock_close(static_cast<SOCKET>(u.sock));
         u.sock = OPENMSX_INVALID_SOCKET;
@@ -997,7 +1010,8 @@ void UnapiNet::cmdUdpClose()
         return;
     }
 
-    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == OPENMSX_INVALID_SOCKET) {
+    auto* up = udpForHandle(h);
+    if (!up || up->sock == OPENMSX_INVALID_SOCKET) {
         setResultByte(1);
         return;
     }
@@ -1016,8 +1030,8 @@ void UnapiNet::cmdUdpState()
     uint16_t size = 0;
     if (!paramBuf.empty()) {
         int h = paramBuf[0];
-        if (h >= 1 && h <= MAX_UDP && udp[h - 1].sock != OPENMSX_INVALID_SOCKET) {
-            auto& u = udp[h - 1];
+        if (auto* up = udpForHandle(h); up && up->sock != OPENMSX_INVALID_SOCKET) {
+            auto& u = *up;
             std::scoped_lock lock(u.mutex);
             if (!u.recvQueue.empty()) {
                 size = static_cast<uint16_t>(
@@ -1045,11 +1059,12 @@ void UnapiNet::cmdUdpSend()
     }
     auto ph = fromBytes<UdpSendParamHeader>(paramBuf);
     int h = ph.handle;
-    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == OPENMSX_INVALID_SOCKET) {
+    auto* up = udpForHandle(h);
+    if (!up || up->sock == OPENMSX_INVALID_SOCKET) {
         setResultByte(1);
         return;
     }
-    auto& u = udp[h - 1];
+    auto& u = *up;
 
     uint32_t ip   = ph.destIp;
     uint16_t port = ph.destPort;
@@ -1084,11 +1099,12 @@ void UnapiNet::cmdUdpRecv()
     int h = p.handle;
     uint16_t maxlen = p.maxlen;
 
-    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == OPENMSX_INVALID_SOCKET) {
+    auto* up = udpForHandle(h);
+    if (!up || up->sock == OPENMSX_INVALID_SOCKET) {
         setResult(UdpRecvResultHeader{}, std::span<const uint8_t>{});
         return;
     }
-    auto& u = udp[h - 1];
+    auto& u = *up;
 
     UdpDatagram dg;
     bool haveDg = false;

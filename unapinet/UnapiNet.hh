@@ -226,12 +226,15 @@ private:
     }
 
     [[nodiscard]] int allocTcpHandle();
+    // Validate a 1-based handle and return the connection, or nullptr.
+    [[nodiscard]] TcpConnection* tcpForHandle(int h);
     void closeTcpSocket(int h);
     // Quick teardown of a live connection from the receiver/send paths: record
     // the reason, close the socket and mark it CLOSED (does not clear the
     // remote/local metadata — that is closeTcpSocket's job).
     void forceClose(TcpConnection& c, CloseReason reason);
     [[nodiscard]] int allocUdpHandle();
+    [[nodiscard]] UdpConnection* udpForHandle(int h);
     void closeUdpSocket(int h);
     void closeAllConnections();
 
