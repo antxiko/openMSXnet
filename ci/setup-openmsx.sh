@@ -101,7 +101,7 @@ if "sock_makeIPv4" not in s:
         "\tSOCKET sd = socket(AF_INET, SOCK_DGRAM, 0);\n\tif (sd == OPENMSX_INVALID_SOCKET) return 0;\n"
         "\tsockaddr_in remote = sock_makeIPv4(0x08080808, 53);\n\tuint32_t ip = 0;\n"
         "\tif (connect(sd, std::bit_cast<sockaddr*>(&remote), sizeof(remote)) == 0) {\n"
-        "\t\tsockaddr_in local = {};\n\t\tsocklen_t len = sizeof(local);\n"
+        "\t\tsockaddr_in local = {};\n\t\t::socklen_t len = sizeof(local);\n"
         "\t\tif (getsockname(sd, std::bit_cast<sockaddr*>(&local), &len) == 0) {\n"
         "\t\t\tip = ntohl(local.sin_addr.s_addr);\n\t\t}\n\t}\n\tsock_close(sd);\n\treturn ip;\n}\n")
     s = s.replace("\n} // namespace openmsx\n", funcs + "\n} // namespace openmsx\n", 1)
