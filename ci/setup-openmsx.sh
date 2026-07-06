@@ -29,7 +29,8 @@ cd "${OPENMSX_DIR}"
 # Stage the extension sources. openMSX auto-discovers src/*/ subdirs in
 # build/main.mk via `find src -type d`, so no makefile registration needed.
 mkdir -p src/unapinet share/extensions
-cp "${ROOT}/unapinet/UnapiNet.hh" "${ROOT}/unapinet/UnapiNet.cc" src/unapinet/
+cp "${ROOT}/unapinet/UnapiNet.hh" "${ROOT}/unapinet/UnapiNet.cc" \
+   "${ROOT}/unapinet/UnapiNetWire.hh" src/unapinet/
 cp "${ROOT}/unapinet/unapinet.xml" share/extensions/
 
 # Register the device class in DeviceFactory.cc (idempotent).
@@ -52,6 +53,60 @@ s = s.replace(
 p.write_text(s)
 PY
 fi
+
+# Extract generic host-socket helpers (used by UnapiNet) into openMSX's
+# Socket.hh/.cc (matches the local build tree). Idempotent.
+python3 - <<'PY'
+import pathlib
+hh = pathlib.Path("src/events/Socket.hh")
+s = hh.read_text()
+if "sock_makeIPv4" not in s:
+    s = s.replace(
+        "#include <cassert>\n#include <cstddef>\n#include <string>\n",
+        "#include <cassert>\n#include <cstddef>\n#include <cstdint>\n#include <string>\n", 1)
+    s = s.replace(
+        "#include <sys/socket.h>\n#include <sys/un.h>\n",
+        "#include <sys/socket.h>\n#include <sys/select.h>\n#include <sys/un.h>\n", 1)
+    s = s.replace(
+        "[[nodiscard]] ptrdiff_t sock_send(SOCKET sd, const char* buf, size_t count);\n",
+        "[[nodiscard]] ptrdiff_t sock_send(SOCKET sd, const char* buf, size_t count);\n"
+        "\n"
+        "// Make socket 'sd' non-blocking.\n"
+        "void sock_setNonBlocking(SOCKET sd);\n"
+        "// Set an integer/boolean socket option (wraps the Windows 'const char*' cast).\n"
+        "void sock_setIntOption(SOCKET sd, int level, int optName, int value = 1);\n"
+        "// Non-blocking readiness poll (zero timeout): data ready or pending connection.\n"
+        "[[nodiscard]] bool sock_readable(SOCKET sd);\n"
+        "// Build an IPv4 sockaddr_in (network order); hostIp==0 -> INADDR_ANY.\n"
+        "[[nodiscard]] sockaddr_in sock_makeIPv4(uint32_t hostIp, uint16_t port);\n"
+        "// Best-effort local IPv4 (host order, 0 if unknown). Sends no packets.\n"
+        "[[nodiscard]] uint32_t sock_localIPv4();\n", 1)
+    hh.write_text(s)
+cc = pathlib.Path("src/events/Socket.cc")
+s = cc.read_text()
+if "sock_makeIPv4" not in s:
+    funcs = (
+        "\nvoid sock_setNonBlocking(SOCKET sd)\n{\n"
+        "#ifdef _WIN32\n\tu_long mode = 1;\n\tioctlsocket(sd, FIONBIO, &mode);\n"
+        "#else\n\tint flags = fcntl(sd, F_GETFL, 0);\n\tfcntl(sd, F_SETFL, flags | O_NONBLOCK);\n#endif\n}\n\n"
+        "void sock_setIntOption(SOCKET sd, int level, int optName, int value)\n{\n"
+        "\tsetsockopt(sd, level, optName, std::bit_cast<const char*>(&value), sizeof(value));\n}\n\n"
+        "bool sock_readable(SOCKET sd)\n{\n"
+        "\tfd_set rfds;\n\tFD_ZERO(&rfds);\n\tFD_SET(sd, &rfds);\n\ttimeval tv = {0, 0};\n"
+        "\treturn select(static_cast<int>(sd) + 1, &rfds, nullptr, nullptr, &tv) > 0;\n}\n\n"
+        "sockaddr_in sock_makeIPv4(uint32_t hostIp, uint16_t port)\n{\n"
+        "\tsockaddr_in addr = {};\n\taddr.sin_family = AF_INET;\n"
+        "\taddr.sin_addr.s_addr = htonl(hostIp);\n\taddr.sin_port = htons(port);\n\treturn addr;\n}\n\n"
+        "uint32_t sock_localIPv4()\n{\n"
+        "\tSOCKET sd = socket(AF_INET, SOCK_DGRAM, 0);\n\tif (sd == OPENMSX_INVALID_SOCKET) return 0;\n"
+        "\tsockaddr_in remote = sock_makeIPv4(0x08080808, 53);\n\tuint32_t ip = 0;\n"
+        "\tif (connect(sd, std::bit_cast<sockaddr*>(&remote), sizeof(remote)) == 0) {\n"
+        "\t\tsockaddr_in local = {};\n\t\t::socklen_t len = sizeof(local);\n"
+        "\t\tif (getsockname(sd, std::bit_cast<sockaddr*>(&local), &len) == 0) {\n"
+        "\t\t\tip = ntohl(local.sin_addr.s_addr);\n\t\t}\n\t}\n\tsock_close(sd);\n\treturn ip;\n}\n")
+    s = s.replace("\n} // namespace openmsx\n", funcs + "\n} // namespace openmsx\n", 1)
+    cc.write_text(s)
+PY
 
 # All platforms: gate -ldl to Linux only. The stock build adds -ldl on every
 # non-mingw target, which fails on macOS where libdl does not exist.

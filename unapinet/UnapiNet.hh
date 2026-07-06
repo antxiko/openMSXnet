@@ -2,6 +2,11 @@
 #define UNAPINET_HH
 
 #include "MSXDevice.hh"
+#include "Socket.hh"
+#ifdef interface
+#undef interface  // winsock2.h (pulled in by Socket.hh) #defines `interface`;
+#endif            // undo it so it can't clobber other openMSX headers.
+#include "UnapiNetWire.hh"
 
 #include <atomic>
 #include <cstdint>
@@ -17,8 +22,6 @@
 //  Puertos I/O 0x28 (cmd/status) y 0x29 (data). Mismo rango que el
 //  DenYoNet — ambos son bridges UNAPI Ethernet y no coexisten.
 //  Bridge entre MSX y sockets BSD del host.
-//  No incluimos Socket.hh aquí para evitar conflicto con
-//  la macro "interface" de windows.h.
 // ============================================================
 
 namespace openmsx {
@@ -37,6 +40,10 @@ public:
     void serialize(Archive& ar, unsigned version);
 
 private:
+    // Keep the host socket subsystem initialized for this device's lifetime
+    // (WSAStartup/WSACleanup on Windows). Empty type -> [[no_unique_address]].
+    [[no_unique_address]] SocketActivator socketActivator;
+
     // --- Estado del protocolo I/O ---
     enum class State { IDLE, RESULT_READY };
     State    state;
@@ -62,7 +69,7 @@ private:
     static constexpr uint8_t CMD_UDP_OPEN   = 0x09;
     static constexpr uint8_t CMD_UDP_CLOSE  = 0x0A;
     static constexpr uint8_t CMD_UDP_STATE  = 0x0B;
-    static constexpr uint8_t CMD_UDP_SEND   = 0x29;
+    static constexpr uint8_t CMD_UDP_SEND   = 0x0C;
     static constexpr uint8_t CMD_GET_LOCALIP = 0x0D;
     static constexpr uint8_t CMD_NET_STATE  = 0x0E;
     static constexpr uint8_t CMD_UDP_RECV   = 0x0F;
@@ -95,15 +102,16 @@ private:
         TCP_TIME_WAIT   = 10,
     };
 
-    // Usamos intptr_t en vez de SOCKET para evitar incluir
-    // winsock2.h en el header (conflicto con macro "interface").
-    // El cast real se hace en el .cc.
-    static constexpr intptr_t INVALID_SOCK = -1;
+    // Wire-defined TCP close-reason codes (read back by the UNAPI TSR).
+    enum class CloseReason : uint8_t {
+        None = 0, NeverUsed = 1, ClosedByUser = 2,
+        Aborted = 3, ConnectionReset = 4, ConnectFailed = 6,
+    };
 
     struct TcpConnection {
-        intptr_t sock = INVALID_SOCK;
+        SOCKET sock = OPENMSX_INVALID_SOCKET;
         std::atomic<uint8_t> tcpState{TCP_CLOSED};
-        uint8_t  closeReason = 1;   // 1 = never used
+        CloseReason closeReason = CloseReason::NeverUsed;
         bool     resident = false;
         uint32_t remoteIP = 0;
         uint16_t remotePort = 0;
@@ -124,7 +132,7 @@ private:
     };
 
     struct UdpConnection {
-        intptr_t sock = INVALID_SOCK;
+        SOCKET sock = OPENMSX_INVALID_SOCKET;
         uint16_t localPort = 0;
         bool     resident = false;
         std::deque<UdpDatagram> recvQueue;
@@ -154,8 +162,9 @@ private:
     } icmpRequest;
 
     // --- DNS asíncrono ---
+    enum class DnsStatus : uint8_t { Idle = 0, InProgress = 1, Complete = 2, Error = 3 };
     struct {
-        std::atomic<int> status{0}; // 0=idle 1=in_progress 2=complete 3=error
+        std::atomic<DnsStatus> status{DnsStatus::Idle};
         uint32_t resolvedIP = 0;
         uint8_t  errorCode = 0;
     } dns;
@@ -191,18 +200,44 @@ private:
 
     // --- Helpers ---
     void setResult(const uint8_t* data, size_t len);
-    void setResultVec(const std::vector<uint8_t>& v);
     void setResultByte(uint8_t b);
     void setError();
 
-    int  allocTcpHandle();
+    // Serialize a wire-layout struct (an Endian::UA_* record from
+    // UnapiNetWire.hh) straight into the result buffer, replacing manual
+    // byte packing. The compiler lays out the exact on-wire bytes.
+    template<wire_layout T>
+    void setResult(const T& d)
+    {
+        auto bytes = toBytes(d);
+        setResult(bytes.data(), bytes.size());
+    }
+    // Fixed-size header struct followed by a variable payload
+    // (used by TCP_RECV / UDP_RECV).
+    template<wire_layout T>
+    void setResult(const T& hdr, std::span<const uint8_t> payload)
+    {
+        auto h = toBytes(hdr);
+        resultBuf.assign(h.begin(), h.end());
+        resultBuf.insert(resultBuf.end(), payload.begin(), payload.end());
+        resultPos = 0;
+        state     = State::RESULT_READY;
+        statusReg = STATUS_DATA;
+    }
+
+    [[nodiscard]] int allocTcpHandle();
+    // Validate a 1-based handle and return the connection, or nullptr.
+    [[nodiscard]] TcpConnection* tcpForHandle(int h);
     void closeTcpSocket(int h);
-    int  allocUdpHandle();
+    // Quick teardown of a live connection from the receiver/send paths: record
+    // the reason, close the socket and mark it CLOSED (does not clear the
+    // remote/local metadata — that is closeTcpSocket's job).
+    void forceClose(TcpConnection& c, CloseReason reason);
+    [[nodiscard]] int allocUdpHandle();
+    [[nodiscard]] UdpConnection* udpForHandle(int h);
     void closeUdpSocket(int h);
     void closeAllConnections();
 
-    static void setNonBlocking(intptr_t s);
-    static uint32_t getHostLocalIP();
 };
 
 } // namespace openmsx

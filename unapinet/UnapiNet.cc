@@ -24,9 +24,7 @@
 #include <chrono>
 #include <cstring>
 
-// Helper para convertir entre intptr_t (header) y SOCKET (socket API)
-#define SOCK(x) static_cast<SOCKET>(x)
-#define ISOCK(x) static_cast<intptr_t>(x)
+// Socket handles are openMSX SOCKET values (see Socket.hh); no casts needed.
 
 // ============================================================
 //  UnapiNet  –  openMSX Extension  (Phase 2)
@@ -51,10 +49,6 @@ static constexpr size_t MAX_TRANSFER = 4096;
 static constexpr size_t MAX_RECV_BUF = 65536;
 
 namespace openmsx {
-
-// Activación de sockets RAII (WSAStartup en Windows).
-// Variable estática: se inicializa la primera vez que se crea un UnapiNet.
-static SocketActivator socketActivator;
 
 // ============================================================
 //  Constructor / Destructor
@@ -98,7 +92,7 @@ void UnapiNet::reset(EmuTime /*time*/)
 
     closeAllConnections();
 
-    dns.status = 0;
+    dns.status = DnsStatus::Idle;
     dns.resolvedIP = 0;
     dns.errorCode = 0;
 }
@@ -168,14 +162,6 @@ void UnapiNet::setResult(const uint8_t* data, size_t len)
     statusReg = STATUS_DATA;
 }
 
-void UnapiNet::setResultVec(const std::vector<uint8_t>& v)
-{
-    resultBuf = v;
-    resultPos = 0;
-    state     = State::RESULT_READY;
-    statusReg = STATUS_DATA;
-}
-
 void UnapiNet::setResultByte(uint8_t b)
 {
     setResult(&b, 1);
@@ -196,7 +182,7 @@ void UnapiNet::setError()
 int UnapiNet::allocTcpHandle()
 {
     for (int i = 0; i < MAX_TCP; i++) {
-        if (tcp[i].sock == INVALID_SOCK &&
+        if (tcp[i].sock == OPENMSX_INVALID_SOCKET &&
             tcp[i].tcpState == TCP_CLOSED) {
             return i + 1; // handles 1-based
         }
@@ -204,13 +190,24 @@ int UnapiNet::allocTcpHandle()
     return 0; // no hay handles libres
 }
 
+UnapiNet::TcpConnection* UnapiNet::tcpForHandle(int h)
+{
+    return (h >= 1 && h <= MAX_TCP) ? &tcp[h - 1] : nullptr;
+}
+
+UnapiNet::UdpConnection* UnapiNet::udpForHandle(int h)
+{
+    return (h >= 1 && h <= MAX_UDP) ? &udp[h - 1] : nullptr;
+}
+
 void UnapiNet::closeTcpSocket(int h)
 {
-    if (h < 1 || h > MAX_TCP) return;
-    auto& c = tcp[h - 1];
-    if (c.sock != INVALID_SOCK) {
+    auto* cp = tcpForHandle(h);
+    if (!cp) return;
+    auto& c = *cp;
+    if (c.sock != OPENMSX_INVALID_SOCKET) {
         sock_close(static_cast<SOCKET>(c.sock));
-        c.sock = INVALID_SOCK;
+        c.sock = OPENMSX_INVALID_SOCKET;
     }
     c.tcpState   = TCP_CLOSED;
     c.connecting  = false;
@@ -228,54 +225,11 @@ void UnapiNet::closeAllConnections()
 {
     for (int i = 1; i <= MAX_TCP; i++) {
         closeTcpSocket(i);
-        tcp[i - 1].closeReason = 1;
+        tcp[i - 1].closeReason = CloseReason::NeverUsed;
     }
     for (int i = 1; i <= MAX_UDP; i++) {
         closeUdpSocket(i);
     }
-}
-
-// ============================================================
-//  Socket helpers
-// ============================================================
-
-void UnapiNet::setNonBlocking(intptr_t s)
-{
-    SOCKET sd = SOCK(s);
-#ifdef _WIN32
-    u_long mode = 1;
-    ioctlsocket(sd, FIONBIO, &mode);
-#else
-    int flags = fcntl(sd, F_GETFL, 0);
-    fcntl(sd, F_SETFL, flags | O_NONBLOCK);
-#endif
-}
-
-uint32_t UnapiNet::getHostLocalIP()
-{
-    // Intenta obtener la IP local conectando un socket UDP a 8.8.8.8
-    // sin enviar datos. getsockname() devuelve la IP de la interfaz usada.
-    SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s == OPENMSX_INVALID_SOCKET) return 0;
-
-    struct sockaddr_in remote;
-    memset(&remote, 0, sizeof(remote));
-    remote.sin_family = AF_INET;
-    remote.sin_port = htons(53);
-    inet_pton(AF_INET, "8.8.8.8", &remote.sin_addr);
-
-    uint32_t ip = 0;
-    if (connect(s, reinterpret_cast<struct sockaddr*>(&remote),
-                sizeof(remote)) == 0) {
-        struct sockaddr_in local;
-        ::socklen_t len = sizeof(local);
-        if (getsockname(s, reinterpret_cast<struct sockaddr*>(&local),
-                        &len) == 0) {
-            ip = ntohl(local.sin_addr.s_addr);
-        }
-    }
-    sock_close(s);
-    return ip;
 }
 
 // ============================================================
@@ -287,27 +241,31 @@ uint32_t UnapiNet::getHostLocalIP()
 //  transiciones de estado (cierre remoto, etc.).
 // ============================================================
 
+void UnapiNet::forceClose(TcpConnection& c, CloseReason reason)
+{
+    c.closeReason = reason;
+    if (c.sock != OPENMSX_INVALID_SOCKET) {
+        sock_close(c.sock);
+        c.sock = OPENMSX_INVALID_SOCKET;
+    }
+    c.tcpState   = TCP_CLOSED;
+    c.connecting = false;
+}
+
 void UnapiNet::receiverLoop()
 {
     while (running) {
         // Dormir un poco para no quemar CPU
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-        for (int i = 0; i < MAX_TCP; i++) {
-            auto& c = tcp[i];
-            if (c.sock == INVALID_SOCK) continue;
+        for (auto& c : tcp) {
+            if (c.sock == OPENMSX_INVALID_SOCKET) continue;
 
-            SOCKET sd = SOCK(c.sock);
+            SOCKET sd = c.sock;
 
             // --- Listening socket: accept non-blocking ---
             if (c.tcpState == TCP_LISTEN) {
-                fd_set rfds;
-                FD_ZERO(&rfds);
-                FD_SET(sd, &rfds);
-                struct timeval tv = {0, 0};
-                if (select(static_cast<int>(sd) + 1, &rfds, nullptr, nullptr, &tv) <= 0) {
-                    continue;
-                }
+                if (!sock_readable(sd)) continue;
                 struct sockaddr_in peer;
                 ::socklen_t plen = sizeof(peer);
                 SOCKET a = accept(sd, reinterpret_cast<struct sockaddr*>(&peer), &plen);
@@ -320,11 +278,9 @@ void UnapiNet::receiverLoop()
                 }
                 // Replace listening socket with accepted socket
                 sock_close(sd);
-                setNonBlocking(ISOCK(a));
-                int one = 1;
-                setsockopt(a, IPPROTO_TCP, TCP_NODELAY,
-                           reinterpret_cast<const char*>(&one), sizeof(one));
-                c.sock = ISOCK(a);
+                sock_setNonBlocking(a);
+                sock_setIntOption(a, IPPROTO_TCP, TCP_NODELAY);
+                c.sock = a;
                 c.tcpState = TCP_ESTABLISHED;
                 c.remoteIP = peerIP;
                 c.remotePort = ntohs(peer.sin_port);
@@ -344,11 +300,7 @@ void UnapiNet::receiverLoop()
                                nullptr, &wfds, &efds, &tv);
                 if (r > 0) {
                     if (FD_ISSET(sd, &efds)) {
-                        c.tcpState    = TCP_CLOSED;
-                        c.closeReason = 6;
-                        c.connecting  = false;
-                        sock_close(sd);
-                        c.sock = INVALID_SOCK;
+                        forceClose(c, CloseReason::ConnectFailed);
                     } else if (FD_ISSET(sd, &wfds)) {
                         int err = 0;
                         ::socklen_t elen = sizeof(err);
@@ -358,11 +310,7 @@ void UnapiNet::receiverLoop()
                             c.tcpState   = TCP_ESTABLISHED;
                             c.connecting = false;
                         } else {
-                            c.tcpState    = TCP_CLOSED;
-                            c.closeReason = 6;
-                            c.connecting  = false;
-                            sock_close(sd);
-                            c.sock = INVALID_SOCK;
+                            forceClose(c, CloseReason::ConnectFailed);
                         }
                     }
                 }
@@ -375,14 +323,7 @@ void UnapiNet::receiverLoop()
                 continue;
             }
 
-            fd_set rfds;
-            FD_ZERO(&rfds);
-            FD_SET(sd, &rfds);
-            struct timeval tv = {0, 0};
-
-            int r = select(static_cast<int>(sd) + 1,
-                           &rfds, nullptr, nullptr, &tv);
-            if (r <= 0) continue;
+            if (!sock_readable(sd)) continue;
 
             char buf[512];
             auto n = sock_recv(sd, buf, sizeof(buf));
@@ -396,26 +337,16 @@ void UnapiNet::receiverLoop()
             } else if (n == 0) {
                 c.tcpState = TCP_CLOSE_WAIT;
             } else {
-                c.tcpState    = TCP_CLOSED;
-                c.closeReason = 4;
-                sock_close(sd);
-                c.sock = INVALID_SOCK;
+                forceClose(c, CloseReason::ConnectionReset);
             }
         }
 
         // --- Poll UDP sockets for incoming datagrams ---
-        for (int i = 0; i < MAX_UDP; i++) {
-            auto& u = udp[i];
-            if (u.sock == INVALID_SOCK) continue;
+        for (auto& u : udp) {
+            if (u.sock == OPENMSX_INVALID_SOCKET) continue;
 
-            SOCKET sd = static_cast<SOCKET>(u.sock);
-            fd_set rfds;
-            FD_ZERO(&rfds);
-            FD_SET(sd, &rfds);
-            struct timeval tv = {0, 0};
-
-            if (select(static_cast<int>(sd) + 1,
-                       &rfds, nullptr, nullptr, &tv) <= 0) continue;
+            SOCKET sd = u.sock;
+            if (!sock_readable(sd)) continue;
 
             char buf[2048];
             struct sockaddr_in src;
@@ -485,8 +416,10 @@ void UnapiNet::cmdPing()
 
 void UnapiNet::cmdQueryCap()
 {
-    uint8_t buf[2] = {CAP_BYTE0, CAP_BYTE1};
-    setResult(buf, 2);
+    QueryCapResult r{};
+    r.cap0 = CAP_BYTE0;
+    r.cap1 = CAP_BYTE1;
+    setResult(r);
 }
 
 // ============================================================
@@ -525,27 +458,24 @@ void UnapiNet::cmdDnsQuery()
         // Es una IP directa
         uint32_t ip = ntohl(addr.s_addr);
         dns.resolvedIP = ip;
-        dns.status = 2; // complete
+        dns.status = DnsStatus::Complete; // complete
         dns.errorCode = 0;
 
-        uint8_t res[5];
-        res[0] = 1; // resuelto inmediatamente
-        res[1] = static_cast<uint8_t>((ip >> 24) & 0xFF);
-        res[2] = static_cast<uint8_t>((ip >> 16) & 0xFF);
-        res[3] = static_cast<uint8_t>((ip >>  8) & 0xFF);
-        res[4] = static_cast<uint8_t>((ip >>  0) & 0xFF);
-        setResult(res, 5);
+        DnsQueryResult r{};
+        r.status = 1; // resuelto inmediatamente
+        r.ip     = ip;
+        setResult(r);
         return;
     }
 
     // Resolución asíncrona
-    if (dns.status == 1) {
+    if (dns.status == DnsStatus::InProgress) {
         // Ya hay una query en curso
         setError();
         return;
     }
 
-    dns.status = 1; // in_progress
+    dns.status = DnsStatus::InProgress; // in_progress
     dns.resolvedIP = 0;
     dns.errorCode = 0;
 
@@ -568,12 +498,12 @@ void UnapiNet::cmdDnsQuery()
             // so bytes extract as octets: (ip>>24)=first, (ip>>0)=last
             dns.resolvedIP = ntohl(addr4->sin_addr.s_addr);
             dns.errorCode = 0;
-            dns.status = 2; // complete
+            dns.status = DnsStatus::Complete; // complete
             freeaddrinfo(res);
         } else {
             if (res) freeaddrinfo(res);
             dns.errorCode = 3; // host name does not exist
-            dns.status = 3; // error
+            dns.status = DnsStatus::Error; // error
         }
     });
 
@@ -592,24 +522,20 @@ void UnapiNet::cmdDnsQuery()
 
 void UnapiNet::cmdDnsStatus()
 {
-    int s = dns.status.load();
+    auto s = dns.status.load();
 
-    if (s == 2) {
+    if (s == DnsStatus::Complete) {
         // Completo
-        uint32_t ip = dns.resolvedIP;
-        uint8_t res[5];
-        res[0] = 2;
-        res[1] = static_cast<uint8_t>((ip >> 24) & 0xFF);
-        res[2] = static_cast<uint8_t>((ip >> 16) & 0xFF);
-        res[3] = static_cast<uint8_t>((ip >>  8) & 0xFF);
-        res[4] = static_cast<uint8_t>((ip >>  0) & 0xFF);
-        setResult(res, 5);
-    } else if (s == 3) {
+        DnsStatusResult r{};
+        r.status = 2;
+        r.ip     = dns.resolvedIP;
+        setResult(r);
+    } else if (s == DnsStatus::Error) {
         // Error
-        uint8_t res[2];
-        res[0] = 0xFF;
-        res[1] = dns.errorCode;
-        setResult(res, 2);
+        DnsStatusError r{};
+        r.status    = 0xFF;
+        r.errorCode = dns.errorCode;
+        setResult(r);
     } else {
         // idle (0) o in_progress (1)
         setResultByte(static_cast<uint8_t>(s));
@@ -625,20 +551,16 @@ void UnapiNet::cmdDnsStatus()
 
 void UnapiNet::cmdTcpOpen()
 {
-    if (paramBuf.size() < 11) {
+    if (paramBuf.size() < sizeof(TcpOpenParams)) {
         setResultByte(0);
         return;
     }
 
-    uint32_t ip = (static_cast<uint32_t>(paramBuf[0]) << 24) |
-                  (static_cast<uint32_t>(paramBuf[1]) << 16) |
-                  (static_cast<uint32_t>(paramBuf[2]) <<  8) |
-                  (static_cast<uint32_t>(paramBuf[3]) <<  0);
-    uint16_t remotePort = static_cast<uint16_t>(paramBuf[4]) |
-                          (static_cast<uint16_t>(paramBuf[5]) << 8);
-    uint16_t localPortReq = static_cast<uint16_t>(paramBuf[6]) |
-                            (static_cast<uint16_t>(paramBuf[7]) << 8);
-    uint8_t flags = paramBuf[10];
+    auto p = fromBytes<TcpOpenParams>(paramBuf);
+    uint32_t ip           = p.remoteIp;
+    uint16_t remotePort   = p.remotePort;
+    uint16_t localPortReq = p.localPort;
+    uint8_t  flags        = p.flags;
     bool passive  = (flags & 0x01) != 0;
     bool resident = (flags & 0x02) != 0;
 
@@ -656,10 +578,8 @@ void UnapiNet::cmdTcpOpen()
         return;
     }
 
-    int one = 1;
-    setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
-               reinterpret_cast<const char*>(&one), sizeof(one));
-    setNonBlocking(ISOCK(s));
+    sock_setIntOption(s, IPPROTO_TCP, TCP_NODELAY);
+    sock_setNonBlocking(s);
 
     if (passive) {
         // Passive: bind to local port, then listen
@@ -668,13 +588,8 @@ void UnapiNet::cmdTcpOpen()
             localPortReq = 0;
         }
         // Allow address reuse (common for servers)
-        setsockopt(s, SOL_SOCKET, SO_REUSEADDR,
-                   reinterpret_cast<const char*>(&one), sizeof(one));
-        struct sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        addr.sin_port = htons(localPortReq);
+        sock_setIntOption(s, SOL_SOCKET, SO_REUSEADDR);
+        sockaddr_in addr = sock_makeIPv4(INADDR_ANY, localPortReq);
         if (bind(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
             sock_close(s);
             setResultByte(0);
@@ -685,7 +600,7 @@ void UnapiNet::cmdTcpOpen()
             setResultByte(0);
             return;
         }
-        c.sock       = ISOCK(s);
+        c.sock       = s;
         c.tcpState   = TCP_LISTEN;
         c.connecting = false;
 
@@ -700,14 +615,10 @@ void UnapiNet::cmdTcpOpen()
         c.remotePort = remotePort;
     } else {
         // Active connect
-        struct sockaddr_in dest;
-        memset(&dest, 0, sizeof(dest));
-        dest.sin_family = AF_INET;
-        dest.sin_port = htons(remotePort);
-        dest.sin_addr.s_addr = htonl(ip);
+        sockaddr_in dest = sock_makeIPv4(ip, remotePort);
         int ret = connect(s, reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
         if (ret == 0) {
-            c.sock       = ISOCK(s);
+            c.sock       = s;
             c.tcpState   = TCP_ESTABLISHED;
             c.connecting = false;
         } else {
@@ -717,7 +628,7 @@ void UnapiNet::cmdTcpOpen()
 #else
             if (errno == EINPROGRESS) {
 #endif
-                c.sock       = ISOCK(s);
+                c.sock       = s;
                 c.tcpState   = TCP_SYN_SENT;
                 c.connecting = true;
             } else {
@@ -737,7 +648,7 @@ void UnapiNet::cmdTcpOpen()
         }
     }
 
-    c.closeReason = 0;
+    c.closeReason = CloseReason::None;
     c.resident    = resident;
     {
         std::scoped_lock lock(c.mutex);
@@ -755,44 +666,57 @@ void UnapiNet::cmdTcpOpen()
 
 void UnapiNet::cmdTcpSend()
 {
-    if (paramBuf.size() < 3) {
+    if (paramBuf.size() < sizeof(TcpSendParamHeader)) {
         setResultByte(1);
         return;
     }
 
-    int h = paramBuf[0];
-    uint16_t len = static_cast<uint16_t>(paramBuf[1]) |
-                   (static_cast<uint16_t>(paramBuf[2]) << 8);
+    auto ph = fromBytes<TcpSendParamHeader>(paramBuf);
+    int h = ph.handle;
+    uint16_t len = ph.len;
 
-    if (h < 1 || h > MAX_TCP) {
+    auto* cp = tcpForHandle(h);
+    if (!cp) {
         setResultByte(1);
         return;
     }
-
-    auto& c = tcp[h - 1];
-    if (c.sock == INVALID_SOCK ||
+    auto& c = *cp;
+    if (c.sock == OPENMSX_INVALID_SOCKET ||
         (c.tcpState != TCP_ESTABLISHED && c.tcpState != TCP_CLOSE_WAIT)) {
         setResultByte(1);
         return;
     }
 
-    if (paramBuf.size() < static_cast<size_t>(3 + len)) {
+    if (paramBuf.size() < sizeof(TcpSendParamHeader) + len) {
         setResultByte(1);
         return;
     }
 
     // Enviar datos
-    const char* data = reinterpret_cast<const char*>(paramBuf.data() + 3);
+    const char* data = reinterpret_cast<const char*>(paramBuf.data() + sizeof(TcpSendParamHeader));
     size_t sent = 0;
     while (sent < len) {
-        auto n = sock_send(SOCK(c.sock), data + sent, len - sent);
-        if (n <= 0) {
-            c.tcpState    = TCP_CLOSED;
-            c.closeReason = 4;
-            sock_close(SOCK(c.sock));
-            c.sock = INVALID_SOCK;
+        auto n = sock_send(c.sock, data + sent, len - sent);
+        if (n < 0) {
+            // Real socket error: drop the connection.
+            forceClose(c, CloseReason::ConnectionReset);
             setResultByte(1);
             return;
+        }
+        if (n == 0) {
+            // EWOULDBLOCK (sock_send maps it to 0): the kernel send buffer is
+            // full. Wait (bounded) for the socket to drain and retry, instead
+            // of wrongly dropping the connection on a transient stall.
+            fd_set wfds;
+            FD_ZERO(&wfds);
+            FD_SET(c.sock, &wfds);
+            timeval tv = {2, 0};
+            if (select(static_cast<int>(c.sock) + 1, nullptr, &wfds, nullptr, &tv) <= 0) {
+                forceClose(c, CloseReason::ConnectionReset);
+                setResultByte(1);
+                return;
+            }
+            continue;
         }
         sent += static_cast<size_t>(n);
     }
@@ -808,48 +732,40 @@ void UnapiNet::cmdTcpSend()
 
 void UnapiNet::cmdTcpRecv()
 {
-    if (paramBuf.size() < 3) {
-        // Devolver 0 bytes
-        uint8_t res[2] = {0, 0};
-        setResult(res, 2);
+    if (paramBuf.size() < sizeof(TcpRecvParams)) {
+        setResult(TcpRecvResultHeader{}, std::span<const uint8_t>{}); // 0 bytes
         return;
     }
 
-    int h = paramBuf[0];
-    uint16_t maxlen = static_cast<uint16_t>(paramBuf[1]) |
-                      (static_cast<uint16_t>(paramBuf[2]) << 8);
+    auto p = fromBytes<TcpRecvParams>(paramBuf);
+    int h = p.handle;
+    uint16_t maxlen = p.maxlen;
 
-    if (h < 1 || h > MAX_TCP) {
-        uint8_t res[2] = {0, 0};
-        setResult(res, 2);
+    auto* cp = tcpForHandle(h);
+    if (!cp) {
+        setResult(TcpRecvResultHeader{}, std::span<const uint8_t>{});
         return;
     }
-
-    auto& c = tcp[h - 1];
+    auto& c = *cp;
 
     // Limitar al máximo de transferencia
     if (maxlen > MAX_TRANSFER) maxlen = static_cast<uint16_t>(MAX_TRANSFER);
 
-    std::vector<uint8_t> result;
-    result.reserve(2 + maxlen);
-    result.push_back(0); // placeholder len low
-    result.push_back(0); // placeholder len high
-
+    std::vector<uint8_t> payload;
+    payload.reserve(maxlen);
     {
         std::scoped_lock lock(c.mutex);
         uint16_t avail = static_cast<uint16_t>(
             std::min(static_cast<size_t>(maxlen), c.recvBuf.size()));
-
         for (uint16_t i = 0; i < avail; i++) {
-            result.push_back(c.recvBuf.front());
+            payload.push_back(c.recvBuf.front());
             c.recvBuf.pop_front();
         }
-
-        result[0] = static_cast<uint8_t>(avail & 0xFF);
-        result[1] = static_cast<uint8_t>((avail >> 8) & 0xFF);
     }
 
-    setResultVec(result);
+    TcpRecvResultHeader hdr{};
+    hdr.actualLen = static_cast<uint16_t>(payload.size());
+    setResult(hdr, payload);
 }
 
 // ============================================================
@@ -870,8 +786,8 @@ void UnapiNet::cmdTcpClose()
     if (h == 0) {
         // Cerrar todas las conexiones transient
         for (int i = 0; i < MAX_TCP; i++) {
-            if (!tcp[i].resident && tcp[i].sock != INVALID_SOCK) {
-                tcp[i].closeReason = 2; // closed via TCPIP_TCP_CLOSE
+            if (!tcp[i].resident && tcp[i].sock != OPENMSX_INVALID_SOCKET) {
+                tcp[i].closeReason = CloseReason::ClosedByUser;
                 closeTcpSocket(i + 1);
             }
         }
@@ -879,13 +795,13 @@ void UnapiNet::cmdTcpClose()
         return;
     }
 
-    if (h < 1 || h > MAX_TCP) {
+    auto* cp = tcpForHandle(h);
+    if (!cp) {
         setResultByte(1);
         return;
     }
-
-    auto& c = tcp[h - 1];
-    if (c.sock == INVALID_SOCK) {
+    auto& c = *cp;
+    if (c.sock == OPENMSX_INVALID_SOCKET) {
         setResultByte(1);
         return;
     }
@@ -894,11 +810,11 @@ void UnapiNet::cmdTcpClose()
     // and do the actual socket cleanup. Calling sock_close here can
     // deadlock with the recv thread on Windows.
 #ifdef _WIN32
-    shutdown(SOCK(c.sock), SD_SEND);
+    shutdown(c.sock, SD_SEND);
 #else
-    shutdown(SOCK(c.sock), SHUT_WR);
+    shutdown(c.sock, SHUT_WR);
 #endif
-    c.closeReason = 2;
+    c.closeReason = CloseReason::ClosedByUser;
     c.tcpState = TCP_CLOSE_WAIT;
 
     setResultByte(0);
@@ -914,33 +830,28 @@ void UnapiNet::cmdTcpClose()
 
 void UnapiNet::cmdTcpState()
 {
-    uint8_t res[12] = {TCP_CLOSED, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+    TcpStateResult r{};
+    r.closeReason = static_cast<uint8_t>(CloseReason::NeverUsed); // default: no/invalid handle
 
     if (!paramBuf.empty()) {
         int h = paramBuf[0];
-        if (h >= 1 && h <= MAX_TCP) {
-            auto& c = tcp[h - 1];
+        if (auto* cp = tcpForHandle(h)) {
+            auto& c = *cp;
             uint16_t avail;
             {
                 std::scoped_lock lock(c.mutex);
                 avail = static_cast<uint16_t>(
                     std::min(c.recvBuf.size(), static_cast<size_t>(0xFFFF)));
             }
-            res[0] = static_cast<uint8_t>(c.tcpState);
-            res[1] = static_cast<uint8_t>(avail & 0xFF);
-            res[2] = static_cast<uint8_t>((avail >> 8) & 0xFF);
-            res[3] = c.closeReason;
-            res[4] = static_cast<uint8_t>((c.remoteIP >> 24) & 0xFF);
-            res[5] = static_cast<uint8_t>((c.remoteIP >> 16) & 0xFF);
-            res[6] = static_cast<uint8_t>((c.remoteIP >>  8) & 0xFF);
-            res[7] = static_cast<uint8_t>((c.remoteIP >>  0) & 0xFF);
-            res[8] = static_cast<uint8_t>(c.remotePort & 0xFF);
-            res[9] = static_cast<uint8_t>((c.remotePort >> 8) & 0xFF);
-            res[10] = static_cast<uint8_t>(c.localPort & 0xFF);
-            res[11] = static_cast<uint8_t>((c.localPort >> 8) & 0xFF);
+            r.state       = c.tcpState;
+            r.avail       = avail;
+            r.closeReason = static_cast<uint8_t>(c.closeReason);
+            r.remoteIp    = c.remoteIP;
+            r.remotePort  = c.remotePort;
+            r.localPort   = c.localPort;
         }
     }
-    setResult(res, 12);
+    setResult(r);
 }
 
 // ============================================================
@@ -957,12 +868,13 @@ void UnapiNet::cmdTcpAbort()
     }
 
     int h = paramBuf[0];
-    if (h < 1 || h > MAX_TCP || tcp[h - 1].sock == INVALID_SOCK) {
+    auto* cp = tcpForHandle(h);
+    if (!cp || cp->sock == OPENMSX_INVALID_SOCKET) {
         setResultByte(1);
         return;
     }
 
-    tcp[h - 1].closeReason = 3; // aborted via TCPIP_TCP_ABORT
+    cp->closeReason = CloseReason::Aborted;
     closeTcpSocket(h);
     setResultByte(0);
 }
@@ -975,13 +887,9 @@ void UnapiNet::cmdTcpAbort()
 
 void UnapiNet::cmdGetLocalIP()
 {
-    uint32_t ip = getHostLocalIP();
-    uint8_t res[4];
-    res[0] = static_cast<uint8_t>((ip >> 24) & 0xFF);
-    res[1] = static_cast<uint8_t>((ip >> 16) & 0xFF);
-    res[2] = static_cast<uint8_t>((ip >>  8) & 0xFF);
-    res[3] = static_cast<uint8_t>((ip >>  0) & 0xFF);
-    setResult(res, 4);
+    GetLocalIpResult r{};
+    r.ip = sock_localIPv4();
+    setResult(r);
 }
 
 // ============================================================
@@ -1003,7 +911,7 @@ void UnapiNet::cmdNetState()
 int UnapiNet::allocUdpHandle()
 {
     for (int i = 0; i < MAX_UDP; i++) {
-        if (udp[i].sock == INVALID_SOCK) {
+        if (udp[i].sock == OPENMSX_INVALID_SOCKET) {
             return i + 1;
         }
     }
@@ -1012,11 +920,12 @@ int UnapiNet::allocUdpHandle()
 
 void UnapiNet::closeUdpSocket(int h)
 {
-    if (h < 1 || h > MAX_UDP) return;
-    auto& u = udp[h - 1];
-    if (u.sock != INVALID_SOCK) {
+    auto* up = udpForHandle(h);
+    if (!up) return;
+    auto& u = *up;
+    if (u.sock != OPENMSX_INVALID_SOCKET) {
         sock_close(static_cast<SOCKET>(u.sock));
-        u.sock = INVALID_SOCK;
+        u.sock = OPENMSX_INVALID_SOCKET;
     }
     u.localPort = 0;
     u.resident = false;
@@ -1034,12 +943,11 @@ void UnapiNet::closeUdpSocket(int h)
 
 void UnapiNet::cmdUdpOpen()
 {
-    if (paramBuf.size() < 2) {
+    if (paramBuf.size() < sizeof(UdpOpenParams)) {
         setResultByte(0);
         return;
     }
-    uint16_t localPort = static_cast<uint16_t>(paramBuf[0]) |
-                         (static_cast<uint16_t>(paramBuf[1]) << 8);
+    uint16_t localPort = fromBytes<UdpOpenParams>(paramBuf).localPort;
 
     int h = allocUdpHandle();
     if (h == 0) {
@@ -1054,21 +962,15 @@ void UnapiNet::cmdUdpOpen()
         return;
     }
 
-    setNonBlocking(ISOCK(s));
+    sock_setNonBlocking(s);
 
     // Enable broadcast — required by UNAPI clients that do LAN service
     // discovery via sendto(255.255.255.255). Real-hardware UNAPI stacks
     // (GR8NET, Obsonet) allow it implicitly; the BSD socket layer needs
     // the explicit opt-in.
-    int one = 1;
-    setsockopt(s, SOL_SOCKET, SO_BROADCAST,
-               reinterpret_cast<const char*>(&one), sizeof(one));
+    sock_setIntOption(s, SOL_SOCKET, SO_BROADCAST);
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(localPort == 0xFFFF ? 0 : localPort);
+    sockaddr_in addr = sock_makeIPv4(INADDR_ANY, localPort == 0xFFFF ? 0 : localPort);
 
     if (bind(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         // Fallback: if bind to a privileged port (<1024) fails on Windows
@@ -1090,7 +992,7 @@ void UnapiNet::cmdUdpOpen()
         u.localPort = localPort;
     }
 
-    u.sock = ISOCK(s);
+    u.sock = s;
     u.resident = false;
     {
         std::scoped_lock lock(u.mutex);
@@ -1116,7 +1018,7 @@ void UnapiNet::cmdUdpClose()
 
     if (h == 0) {
         for (int i = 0; i < MAX_UDP; i++) {
-            if (!udp[i].resident && udp[i].sock != INVALID_SOCK) {
+            if (!udp[i].resident && udp[i].sock != OPENMSX_INVALID_SOCKET) {
                 closeUdpSocket(i + 1);
             }
         }
@@ -1124,7 +1026,8 @@ void UnapiNet::cmdUdpClose()
         return;
     }
 
-    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == INVALID_SOCK) {
+    auto* up = udpForHandle(h);
+    if (!up || up->sock == OPENMSX_INVALID_SOCKET) {
         setResultByte(1);
         return;
     }
@@ -1143,8 +1046,8 @@ void UnapiNet::cmdUdpState()
     uint16_t size = 0;
     if (!paramBuf.empty()) {
         int h = paramBuf[0];
-        if (h >= 1 && h <= MAX_UDP && udp[h - 1].sock != INVALID_SOCK) {
-            auto& u = udp[h - 1];
+        if (auto* up = udpForHandle(h); up && up->sock != OPENMSX_INVALID_SOCKET) {
+            auto& u = *up;
             std::scoped_lock lock(u.mutex);
             if (!u.recvQueue.empty()) {
                 size = static_cast<uint16_t>(
@@ -1153,11 +1056,9 @@ void UnapiNet::cmdUdpState()
             }
         }
     }
-    uint8_t res[2] = {
-        static_cast<uint8_t>(size & 0xFF),
-        static_cast<uint8_t>((size >> 8) & 0xFF)
-    };
-    setResult(res, 2);
+    UdpStateResult r{};
+    r.firstDgramSize = size;
+    setResult(r);
 }
 
 // ============================================================
@@ -1168,38 +1069,31 @@ void UnapiNet::cmdUdpState()
 
 void UnapiNet::cmdUdpSend()
 {
-    if (paramBuf.size() < 9) {
+    if (paramBuf.size() < sizeof(UdpSendParamHeader)) {
         setResultByte(1);
         return;
     }
-    int h = paramBuf[0];
-    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == INVALID_SOCK) {
+    auto ph = fromBytes<UdpSendParamHeader>(paramBuf);
+    int h = ph.handle;
+    auto* up = udpForHandle(h);
+    if (!up || up->sock == OPENMSX_INVALID_SOCKET) {
         setResultByte(1);
         return;
     }
-    auto& u = udp[h - 1];
+    auto& u = *up;
 
-    uint32_t ip = (static_cast<uint32_t>(paramBuf[1]) << 24) |
-                  (static_cast<uint32_t>(paramBuf[2]) << 16) |
-                  (static_cast<uint32_t>(paramBuf[3]) <<  8) |
-                  (static_cast<uint32_t>(paramBuf[4]) <<  0);
-    uint16_t port = static_cast<uint16_t>(paramBuf[5]) |
-                    (static_cast<uint16_t>(paramBuf[6]) << 8);
-    uint16_t len = static_cast<uint16_t>(paramBuf[7]) |
-                   (static_cast<uint16_t>(paramBuf[8]) << 8);
+    uint32_t ip   = ph.destIp;
+    uint16_t port = ph.destPort;
+    uint16_t len  = ph.len;
 
-    if (paramBuf.size() < static_cast<size_t>(9 + len)) {
+    if (paramBuf.size() < sizeof(UdpSendParamHeader) + len) {
         setResultByte(1);
         return;
     }
 
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family = AF_INET;
-    dest.sin_addr.s_addr = htonl(ip);
-    dest.sin_port = htons(port);
+    sockaddr_in dest = sock_makeIPv4(ip, port);
 
-    const char* data = reinterpret_cast<const char*>(paramBuf.data() + 9);
+    const char* data = reinterpret_cast<const char*>(paramBuf.data() + sizeof(UdpSendParamHeader));
     int n = sendto(static_cast<SOCKET>(u.sock), data, len, 0,
                    reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
     setResultByte(n == len ? 0 : 1);
@@ -1213,21 +1107,20 @@ void UnapiNet::cmdUdpSend()
 
 void UnapiNet::cmdUdpRecv()
 {
-    if (paramBuf.size() < 3) {
-        uint8_t res[8] = {0};
-        setResult(res, 8);
+    if (paramBuf.size() < sizeof(UdpRecvParams)) {
+        setResult(UdpRecvResultHeader{}, std::span<const uint8_t>{});
         return;
     }
-    int h = paramBuf[0];
-    uint16_t maxlen = static_cast<uint16_t>(paramBuf[1]) |
-                      (static_cast<uint16_t>(paramBuf[2]) << 8);
+    auto p = fromBytes<UdpRecvParams>(paramBuf);
+    int h = p.handle;
+    uint16_t maxlen = p.maxlen;
 
-    if (h < 1 || h > MAX_UDP || udp[h - 1].sock == INVALID_SOCK) {
-        uint8_t res[8] = {0};
-        setResult(res, 8);
+    auto* up = udpForHandle(h);
+    if (!up || up->sock == OPENMSX_INVALID_SOCKET) {
+        setResult(UdpRecvResultHeader{}, std::span<const uint8_t>{});
         return;
     }
-    auto& u = udp[h - 1];
+    auto& u = *up;
 
     UdpDatagram dg;
     bool haveDg = false;
@@ -1241,28 +1134,18 @@ void UnapiNet::cmdUdpRecv()
     }
 
     if (!haveDg) {
-        uint8_t res[8] = {0};
-        setResult(res, 8);
+        setResult(UdpRecvResultHeader{}, std::span<const uint8_t>{});
         return;
     }
 
     uint16_t actual = static_cast<uint16_t>(
         std::min(static_cast<size_t>(maxlen), dg.data.size()));
 
-    std::vector<uint8_t> result;
-    result.reserve(8 + actual);
-    result.push_back(static_cast<uint8_t>((dg.srcIP >> 24) & 0xFF));
-    result.push_back(static_cast<uint8_t>((dg.srcIP >> 16) & 0xFF));
-    result.push_back(static_cast<uint8_t>((dg.srcIP >>  8) & 0xFF));
-    result.push_back(static_cast<uint8_t>((dg.srcIP >>  0) & 0xFF));
-    result.push_back(static_cast<uint8_t>(dg.srcPort & 0xFF));
-    result.push_back(static_cast<uint8_t>((dg.srcPort >> 8) & 0xFF));
-    result.push_back(static_cast<uint8_t>(actual & 0xFF));
-    result.push_back(static_cast<uint8_t>((actual >> 8) & 0xFF));
-    for (uint16_t i = 0; i < actual; i++) {
-        result.push_back(dg.data[i]);
-    }
-    setResultVec(result);
+    UdpRecvResultHeader hdr{};
+    hdr.srcIp     = dg.srcIP;
+    hdr.srcPort   = dg.srcPort;
+    hdr.actualLen = actual;
+    setResult(hdr, std::span<const uint8_t>(dg.data.data(), actual));
 }
 
 // ============================================================
@@ -1362,21 +1245,16 @@ void UnapiNet::icmpWorkerLoop()
 // Result: 1 byte status
 void UnapiNet::cmdIcmpSend()
 {
-    if (paramBuf.size() < 11) {
+    if (paramBuf.size() < sizeof(IcmpSendParams)) {
         setResultByte(1);
         return;
     }
-    icmpRequest.dstIP = (static_cast<uint32_t>(paramBuf[0]) << 24) |
-                       (static_cast<uint32_t>(paramBuf[1]) << 16) |
-                       (static_cast<uint32_t>(paramBuf[2]) <<  8) |
-                       (static_cast<uint32_t>(paramBuf[3]) <<  0);
-    icmpRequest.ttl        = paramBuf[4];
-    icmpRequest.identifier = static_cast<uint16_t>(paramBuf[5]) |
-                             (static_cast<uint16_t>(paramBuf[6]) << 8);
-    icmpRequest.sequence   = static_cast<uint16_t>(paramBuf[7]) |
-                             (static_cast<uint16_t>(paramBuf[8]) << 8);
-    icmpRequest.dataLen    = static_cast<uint16_t>(paramBuf[9]) |
-                             (static_cast<uint16_t>(paramBuf[10]) << 8);
+    auto p = fromBytes<IcmpSendParams>(paramBuf);
+    icmpRequest.dstIP      = p.dstIp;
+    icmpRequest.ttl        = p.ttl;
+    icmpRequest.identifier = p.identifier;
+    icmpRequest.sequence   = p.sequence;
+    icmpRequest.dataLen    = p.len;
     if (icmpRequest.dataLen > 512) icmpRequest.dataLen = 512;
 
     icmpPending = true;
@@ -1404,20 +1282,14 @@ void UnapiNet::cmdIcmpRecv()
         return;
     }
 
-    uint8_t res[12];
-    res[0] = 1; // has data
-    res[1] = static_cast<uint8_t>((r.srcIP >> 24) & 0xFF);
-    res[2] = static_cast<uint8_t>((r.srcIP >> 16) & 0xFF);
-    res[3] = static_cast<uint8_t>((r.srcIP >>  8) & 0xFF);
-    res[4] = static_cast<uint8_t>((r.srcIP >>  0) & 0xFF);
-    res[5] = r.ttl;
-    res[6] = static_cast<uint8_t>(r.identifier & 0xFF);
-    res[7] = static_cast<uint8_t>((r.identifier >> 8) & 0xFF);
-    res[8] = static_cast<uint8_t>(r.sequence & 0xFF);
-    res[9] = static_cast<uint8_t>((r.sequence >> 8) & 0xFF);
-    res[10] = static_cast<uint8_t>(r.dataLen & 0xFF);
-    res[11] = static_cast<uint8_t>((r.dataLen >> 8) & 0xFF);
-    setResult(res, 12);
+    IcmpRecvResult out{};
+    out.hasData    = 1;
+    out.srcIp      = r.srcIP;
+    out.ttl        = r.ttl;
+    out.identifier = r.identifier;
+    out.sequence   = r.sequence;
+    out.dataLen    = r.dataLen;
+    setResult(out);
 }
 
 // ============================================================
