@@ -697,10 +697,26 @@ void UnapiNet::cmdTcpSend()
     size_t sent = 0;
     while (sent < len) {
         auto n = sock_send(c.sock, data + sent, len - sent);
-        if (n <= 0) {
+        if (n < 0) {
+            // Real socket error: drop the connection.
             forceClose(c, CloseReason::ConnectionReset);
             setResultByte(1);
             return;
+        }
+        if (n == 0) {
+            // EWOULDBLOCK (sock_send maps it to 0): the kernel send buffer is
+            // full. Wait (bounded) for the socket to drain and retry, instead
+            // of wrongly dropping the connection on a transient stall.
+            fd_set wfds;
+            FD_ZERO(&wfds);
+            FD_SET(c.sock, &wfds);
+            timeval tv = {2, 0};
+            if (select(static_cast<int>(c.sock) + 1, nullptr, &wfds, nullptr, &tv) <= 0) {
+                forceClose(c, CloseReason::ConnectionReset);
+                setResultByte(1);
+                return;
+            }
+            continue;
         }
         sent += static_cast<size_t>(n);
     }
