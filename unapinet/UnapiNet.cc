@@ -50,10 +50,6 @@ static constexpr size_t MAX_RECV_BUF = 65536;
 
 namespace openmsx {
 
-// Activación de sockets RAII (WSAStartup en Windows).
-// Variable estática: se inicializa la primera vez que se crea un UnapiNet.
-static SocketActivator socketActivator;
-
 // ============================================================
 //  Constructor / Destructor
 // ============================================================
@@ -226,49 +222,6 @@ void UnapiNet::closeAllConnections()
 }
 
 // ============================================================
-//  Socket helpers
-// ============================================================
-
-void UnapiNet::setNonBlocking(SOCKET s)
-{
-    SOCKET sd = s;
-#ifdef _WIN32
-    u_long mode = 1;
-    ioctlsocket(sd, FIONBIO, &mode);
-#else
-    int flags = fcntl(sd, F_GETFL, 0);
-    fcntl(sd, F_SETFL, flags | O_NONBLOCK);
-#endif
-}
-
-uint32_t UnapiNet::getHostLocalIP()
-{
-    // Intenta obtener la IP local conectando un socket UDP a 8.8.8.8
-    // sin enviar datos. getsockname() devuelve la IP de la interfaz usada.
-    SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s == OPENMSX_INVALID_SOCKET) return 0;
-
-    struct sockaddr_in remote;
-    memset(&remote, 0, sizeof(remote));
-    remote.sin_family = AF_INET;
-    remote.sin_port = htons(53);
-    inet_pton(AF_INET, "8.8.8.8", &remote.sin_addr);
-
-    uint32_t ip = 0;
-    if (connect(s, reinterpret_cast<struct sockaddr*>(&remote),
-                sizeof(remote)) == 0) {
-        struct sockaddr_in local;
-        ::socklen_t len = sizeof(local);
-        if (getsockname(s, reinterpret_cast<struct sockaddr*>(&local),
-                        &len) == 0) {
-            ip = ntohl(local.sin_addr.s_addr);
-        }
-    }
-    sock_close(s);
-    return ip;
-}
-
-// ============================================================
 //  Hilo receptor de red (background)
 //
 //  Hace poll de todos los sockets TCP activos y mueve datos
@@ -290,13 +243,7 @@ void UnapiNet::receiverLoop()
 
             // --- Listening socket: accept non-blocking ---
             if (c.tcpState == TCP_LISTEN) {
-                fd_set rfds;
-                FD_ZERO(&rfds);
-                FD_SET(sd, &rfds);
-                struct timeval tv = {0, 0};
-                if (select(static_cast<int>(sd) + 1, &rfds, nullptr, nullptr, &tv) <= 0) {
-                    continue;
-                }
+                if (!sock_readable(sd)) continue;
                 struct sockaddr_in peer;
                 ::socklen_t plen = sizeof(peer);
                 SOCKET a = accept(sd, reinterpret_cast<struct sockaddr*>(&peer), &plen);
@@ -309,10 +256,8 @@ void UnapiNet::receiverLoop()
                 }
                 // Replace listening socket with accepted socket
                 sock_close(sd);
-                setNonBlocking(a);
-                int one = 1;
-                setsockopt(a, IPPROTO_TCP, TCP_NODELAY,
-                           reinterpret_cast<const char*>(&one), sizeof(one));
+                sock_setNonBlocking(a);
+                sock_setIntOption(a, IPPROTO_TCP, TCP_NODELAY);
                 c.sock = a;
                 c.tcpState = TCP_ESTABLISHED;
                 c.remoteIP = peerIP;
@@ -364,14 +309,7 @@ void UnapiNet::receiverLoop()
                 continue;
             }
 
-            fd_set rfds;
-            FD_ZERO(&rfds);
-            FD_SET(sd, &rfds);
-            struct timeval tv = {0, 0};
-
-            int r = select(static_cast<int>(sd) + 1,
-                           &rfds, nullptr, nullptr, &tv);
-            if (r <= 0) continue;
+            if (!sock_readable(sd)) continue;
 
             char buf[512];
             auto n = sock_recv(sd, buf, sizeof(buf));
@@ -396,14 +334,8 @@ void UnapiNet::receiverLoop()
         for (auto& u : udp) {
             if (u.sock == OPENMSX_INVALID_SOCKET) continue;
 
-            SOCKET sd = static_cast<SOCKET>(u.sock);
-            fd_set rfds;
-            FD_ZERO(&rfds);
-            FD_SET(sd, &rfds);
-            struct timeval tv = {0, 0};
-
-            if (select(static_cast<int>(sd) + 1,
-                       &rfds, nullptr, nullptr, &tv) <= 0) continue;
+            SOCKET sd = u.sock;
+            if (!sock_readable(sd)) continue;
 
             char buf[2048];
             struct sockaddr_in src;
@@ -635,10 +567,8 @@ void UnapiNet::cmdTcpOpen()
         return;
     }
 
-    int one = 1;
-    setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
-               reinterpret_cast<const char*>(&one), sizeof(one));
-    setNonBlocking(s);
+    sock_setIntOption(s, IPPROTO_TCP, TCP_NODELAY);
+    sock_setNonBlocking(s);
 
     if (passive) {
         // Passive: bind to local port, then listen
@@ -647,13 +577,8 @@ void UnapiNet::cmdTcpOpen()
             localPortReq = 0;
         }
         // Allow address reuse (common for servers)
-        setsockopt(s, SOL_SOCKET, SO_REUSEADDR,
-                   reinterpret_cast<const char*>(&one), sizeof(one));
-        struct sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        addr.sin_port = htons(localPortReq);
+        sock_setIntOption(s, SOL_SOCKET, SO_REUSEADDR);
+        sockaddr_in addr = sock_makeIPv4(INADDR_ANY, localPortReq);
         if (bind(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
             sock_close(s);
             setResultByte(0);
@@ -679,11 +604,7 @@ void UnapiNet::cmdTcpOpen()
         c.remotePort = remotePort;
     } else {
         // Active connect
-        struct sockaddr_in dest;
-        memset(&dest, 0, sizeof(dest));
-        dest.sin_family = AF_INET;
-        dest.sin_port = htons(remotePort);
-        dest.sin_addr.s_addr = htonl(ip);
+        sockaddr_in dest = sock_makeIPv4(ip, remotePort);
         int ret = connect(s, reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
         if (ret == 0) {
             c.sock       = s;
@@ -942,7 +863,7 @@ void UnapiNet::cmdTcpAbort()
 void UnapiNet::cmdGetLocalIP()
 {
     GetLocalIpResult r{};
-    r.ip = getHostLocalIP();
+    r.ip = sock_localIPv4();
     setResult(r);
 }
 
@@ -1015,21 +936,15 @@ void UnapiNet::cmdUdpOpen()
         return;
     }
 
-    setNonBlocking(s);
+    sock_setNonBlocking(s);
 
     // Enable broadcast — required by UNAPI clients that do LAN service
     // discovery via sendto(255.255.255.255). Real-hardware UNAPI stacks
     // (GR8NET, Obsonet) allow it implicitly; the BSD socket layer needs
     // the explicit opt-in.
-    int one = 1;
-    setsockopt(s, SOL_SOCKET, SO_BROADCAST,
-               reinterpret_cast<const char*>(&one), sizeof(one));
+    sock_setIntOption(s, SOL_SOCKET, SO_BROADCAST);
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(localPort == 0xFFFF ? 0 : localPort);
+    sockaddr_in addr = sock_makeIPv4(INADDR_ANY, localPort == 0xFFFF ? 0 : localPort);
 
     if (bind(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         // Fallback: if bind to a privileged port (<1024) fails on Windows
@@ -1148,11 +1063,7 @@ void UnapiNet::cmdUdpSend()
         return;
     }
 
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family = AF_INET;
-    dest.sin_addr.s_addr = htonl(ip);
-    dest.sin_port = htons(port);
+    sockaddr_in dest = sock_makeIPv4(ip, port);
 
     const char* data = reinterpret_cast<const char*>(paramBuf.data() + sizeof(UdpSendParamHeader));
     int n = sendto(static_cast<SOCKET>(u.sock), data, len, 0,

@@ -40,6 +40,10 @@ public:
     void serialize(Archive& ar, unsigned version);
 
 private:
+    // Keep the host socket subsystem initialized for this device's lifetime
+    // (WSAStartup/WSACleanup on Windows). Empty type -> [[no_unique_address]].
+    [[no_unique_address]] SocketActivator socketActivator;
+
     // --- Estado del protocolo I/O ---
     enum class State { IDLE, RESULT_READY };
     State    state;
@@ -220,8 +224,6 @@ private:
     void closeUdpSocket(int h);
     void closeAllConnections();
 
-    static void setNonBlocking(SOCKET s);
-    static uint32_t getHostLocalIP();
 };
 
 } // namespace openmsx
