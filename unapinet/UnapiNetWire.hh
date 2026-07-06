@@ -147,8 +147,6 @@ struct UdpStateResult {
 static_assert(sizeof(UdpStateResult) == 2);
 
 // ---- CMD_UDP_SEND (0x0C) param header (+ 'len' payload bytes) ------------
-// NOTE: current C++ dispatch constant is 0x29 (bug); the TSR issues 0x0C.
-// The FIELD layout here is opcode-independent and byte-identical to both.
 struct UdpSendParamHeader {
 	uint8_t        handle;
 	Endian::UA_B32 destIp;      // big-endian

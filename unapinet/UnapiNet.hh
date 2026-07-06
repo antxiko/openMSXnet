@@ -69,7 +69,7 @@ private:
     static constexpr uint8_t CMD_UDP_OPEN   = 0x09;
     static constexpr uint8_t CMD_UDP_CLOSE  = 0x0A;
     static constexpr uint8_t CMD_UDP_STATE  = 0x0B;
-    static constexpr uint8_t CMD_UDP_SEND   = 0x29;
+    static constexpr uint8_t CMD_UDP_SEND   = 0x0C;
     static constexpr uint8_t CMD_GET_LOCALIP = 0x0D;
     static constexpr uint8_t CMD_NET_STATE  = 0x0E;
     static constexpr uint8_t CMD_UDP_RECV   = 0x0F;
