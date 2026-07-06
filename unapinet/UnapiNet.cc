@@ -166,14 +166,6 @@ void UnapiNet::setResult(const uint8_t* data, size_t len)
     statusReg = STATUS_DATA;
 }
 
-void UnapiNet::setResultVec(const std::vector<uint8_t>& v)
-{
-    resultBuf = v;
-    resultPos = 0;
-    state     = State::RESULT_READY;
-    statusReg = STATUS_DATA;
-}
-
 void UnapiNet::setResultByte(uint8_t b)
 {
     setResult(&b, 1);
@@ -291,8 +283,7 @@ void UnapiNet::receiverLoop()
         // Dormir un poco para no quemar CPU
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-        for (int i = 0; i < MAX_TCP; i++) {
-            auto& c = tcp[i];
+        for (auto& c : tcp) {
             if (c.sock == OPENMSX_INVALID_SOCKET) continue;
 
             SOCKET sd = c.sock;
@@ -402,8 +393,7 @@ void UnapiNet::receiverLoop()
         }
 
         // --- Poll UDP sockets for incoming datagrams ---
-        for (int i = 0; i < MAX_UDP; i++) {
-            auto& u = udp[i];
+        for (auto& u : udp) {
             if (u.sock == OPENMSX_INVALID_SOCKET) continue;
 
             SOCKET sd = static_cast<SOCKET>(u.sock);

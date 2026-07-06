@@ -189,7 +189,6 @@ private:
 
     // --- Helpers ---
     void setResult(const uint8_t* data, size_t len);
-    void setResultVec(const std::vector<uint8_t>& v);
     void setResultByte(uint8_t b);
     void setError();
 
@@ -215,9 +214,9 @@ private:
         statusReg = STATUS_DATA;
     }
 
-    int  allocTcpHandle();
+    [[nodiscard]] int allocTcpHandle();
     void closeTcpSocket(int h);
-    int  allocUdpHandle();
+    [[nodiscard]] int allocUdpHandle();
     void closeUdpSocket(int h);
     void closeAllConnections();
 
