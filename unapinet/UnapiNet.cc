@@ -238,28 +238,84 @@ void UnapiNet::forceClose(TcpConnection& c, CloseReason reason)
 void UnapiNet::receiverLoop()
 {
 	while (running) {
-		// Sleep briefly to avoid burning CPU
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		// Wait on all active sockets at once with a single select() (short
+		// timeout so we periodically re-check 'running' and pick up newly
+		// opened sockets), instead of busy-polling each socket in turn.
+		fd_set rfds;
+		fd_set wfds;
+		fd_set efds;
+		FD_ZERO(&rfds);
+		FD_ZERO(&wfds);
+		FD_ZERO(&efds);
+		SOCKET maxSock = 0;
+		bool any = false;
+		for (auto& c : tcp) {
+			if (c.sock == OPENMSX_INVALID_SOCKET) continue;
+			if (c.connecting) {
+				// connect() completion shows up as writable (POSIX) or in
+				// the exception set (Windows).
+				FD_SET(c.sock, &wfds);
+				FD_SET(c.sock, &efds);
+			} else {
+				FD_SET(c.sock, &rfds);
+			}
+			maxSock = std::max(maxSock, c.sock);
+			any = true;
+		}
+		for (auto& u : udp) {
+			if (u.sock == OPENMSX_INVALID_SOCKET) continue;
+			FD_SET(u.sock, &rfds);
+			maxSock = std::max(maxSock, u.sock);
+			any = true;
+		}
+		if (!any) {
+			// Nothing open yet: avoid a tight loop (select() needs >=1 fd).
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			continue;
+		}
+		struct timeval tv = {0, 100000}; // 100 ms
+		if (select(static_cast<int>(maxSock) + 1, &rfds, &wfds, &efds, &tv) <= 0) {
+			continue; // timeout or error: re-check running and rebuild the set
+		}
 
 		for (auto& c : tcp) {
 			if (c.sock == OPENMSX_INVALID_SOCKET) continue;
-
 			SOCKET sd = c.sock;
 
-			// --- Listening socket: accept non-blocking ---
+			// Pending connect() completion.
+			if (c.connecting) {
+				if (FD_ISSET(sd, &efds)) {
+					forceClose(c, CloseReason::ConnectFailed);
+				} else if (FD_ISSET(sd, &wfds)) {
+					int err = 0;
+					::socklen_t elen = sizeof(err);
+					getsockopt(sd, SOL_SOCKET, SO_ERROR,
+					           reinterpret_cast<char*>(&err), &elen);
+					if (err == 0) {
+						c.tcpState   = TCP_ESTABLISHED;
+						c.connecting = false;
+					} else {
+						forceClose(c, CloseReason::ConnectFailed);
+					}
+				}
+				continue;
+			}
+
+			if (!FD_ISSET(sd, &rfds)) continue;
+
+			// Listening socket: accept the pending connection.
 			if (c.tcpState == TCP_LISTEN) {
-				if (!sock_readable(sd)) continue;
 				struct sockaddr_in peer;
 				::socklen_t plen = sizeof(peer);
 				SOCKET a = accept(sd, reinterpret_cast<struct sockaddr*>(&peer), &plen);
 				if (a == OPENMSX_INVALID_SOCKET) continue;
 				uint32_t peerIp = ntohl(peer.sin_addr.s_addr);
-				// If remoteIp was specified (non-zero), reject others
+				// If a specific remote IP was requested, reject others.
 				if (c.remoteIp != 0 && peerIp != c.remoteIp) {
 					sock_close(a);
 					continue;
 				}
-				// Replace listening socket with accepted socket
+				// Replace the listening socket with the accepted one.
 				sock_close(sd);
 				sock_setNonBlocking(a);
 				sock_setIntOption(a, IPPROTO_TCP, TCP_NODELAY);
@@ -270,44 +326,11 @@ void UnapiNet::receiverLoop()
 				continue;
 			}
 
-			// --- Check for a pending connect() ---
-			if (c.connecting) {
-				fd_set wfds, efds;
-				FD_ZERO(&wfds);
-				FD_ZERO(&efds);
-				FD_SET(sd, &wfds);
-				FD_SET(sd, &efds);
-				struct timeval tv = {0, 0};
-
-				int r = select(static_cast<int>(sd) + 1,
-							   nullptr, &wfds, &efds, &tv);
-				if (r > 0) {
-					if (FD_ISSET(sd, &efds)) {
-						forceClose(c, CloseReason::ConnectFailed);
-					} else if (FD_ISSET(sd, &wfds)) {
-						int err = 0;
-						::socklen_t elen = sizeof(err);
-						getsockopt(sd, SOL_SOCKET, SO_ERROR,
-								   reinterpret_cast<char*>(&err), &elen);
-						if (err == 0) {
-							c.tcpState   = TCP_ESTABLISHED;
-							c.connecting = false;
-						} else {
-							forceClose(c, CloseReason::ConnectFailed);
-						}
-					}
-				}
-				continue;
-			}
-
-			// --- Read incoming data if ESTABLISHED or CLOSE_WAIT ---
+			// Incoming data (ESTABLISHED or CLOSE_WAIT).
 			if (c.tcpState != TCP_ESTABLISHED &&
-				c.tcpState != TCP_CLOSE_WAIT) {
+			    c.tcpState != TCP_CLOSE_WAIT) {
 				continue;
 			}
-
-			if (!sock_readable(sd)) continue;
-
 			char buf[512];
 			auto n = sock_recv(sd, buf, sizeof(buf));
 			if (n > 0) {
@@ -324,27 +347,22 @@ void UnapiNet::receiverLoop()
 			}
 		}
 
-		// --- Poll UDP sockets for incoming datagrams ---
 		for (auto& u : udp) {
 			if (u.sock == OPENMSX_INVALID_SOCKET) continue;
-
+			if (!FD_ISSET(u.sock, &rfds)) continue;
 			SOCKET sd = u.sock;
-			if (!sock_readable(sd)) continue;
-
 			char buf[2048];
 			struct sockaddr_in src;
 			::socklen_t slen = sizeof(src);
 			int n = recvfrom(sd, buf, sizeof(buf), 0,
-							 reinterpret_cast<struct sockaddr*>(&src), &slen);
+			                 reinterpret_cast<struct sockaddr*>(&src), &slen);
 			if (n <= 0) continue;
-
 			UdpDatagram dg;
 			dg.srcIp = ntohl(src.sin_addr.s_addr);
 			dg.srcPort = ntohs(src.sin_port);
 			dg.data.assign(buf, buf + n);
-
 			std::scoped_lock lock(u.mutex);
-			if (u.recvQueue.size() < 16) { // cap at 16 pending dgrams
+			if (u.recvQueue.size() < 16) { // cap pending datagrams
 				u.recvQueue.push_back(std::move(dg));
 			}
 		}
