@@ -11,7 +11,6 @@
 #include <span>
 #include <type_traits>
 
-// ============================================================================
 // UNAPI bridge wire layouts (openMSX Endian::UA_* unaligned types).
 //
 // The MSX <-> host bridge exchanges fixed byte records over I/O ports 0x28/0x29.
@@ -31,7 +30,6 @@
 // USAGE (UA_* has operator= only, no int constructor):
 //   result:  TcpStateResult r{}; r.state = ...; r.remoteIp = ...; setResult(r);
 //   param:   auto p = fromBytes<TcpOpenParams>(paramBuf); uint32_t ip = p.remoteIp;
-// ============================================================================
 
 namespace openmsx {
 
@@ -44,7 +42,17 @@ concept wire_layout =
 	std::is_standard_layout_v<T> &&
 	std::has_unique_object_representations_v<T>;
 
-// Serialize a wire-layout value to its exact on-wire bytes.
+// View a wire-layout value as its exact on-wire bytes (no copy). The result
+// aliases the argument (char-pointer aliasing is well-defined), so it must
+// not outlive it.
+template<wire_layout T>
+[[nodiscard]] std::span<const uint8_t, sizeof(T)> asBytes(const T& d)
+{
+	return std::span<const uint8_t, sizeof(T)>(
+		reinterpret_cast<const uint8_t*>(&d), sizeof(T));
+}
+
+// Copy a wire-layout value to its exact on-wire bytes.
 template<wire_layout T>
 [[nodiscard]] std::array<uint8_t, sizeof(T)> toBytes(const T& d)
 {
