@@ -32,3 +32,6 @@ unapinet_debug.log
 
 # Downloaded CI build artifact (self-contained openmsx.exe for testing)
 ci-openmsx-windows/
+
+# openMSX upstream master checkout (for the upstream port)
+openMSX-master/

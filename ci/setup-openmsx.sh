@@ -65,8 +65,18 @@ if "sock_makeIPv4" not in s:
         "#include <cassert>\n#include <cstddef>\n#include <string>\n",
         "#include <cassert>\n#include <cstddef>\n#include <cstdint>\n#include <string>\n", 1)
     s = s.replace(
-        "#include <sys/socket.h>\n#include <sys/un.h>\n",
-        "#include <sys/socket.h>\n#include <sys/select.h>\n#include <sys/un.h>\n", 1)
+        "#include <sys/types.h>\n#include <sys/socket.h>\n#include <sys/un.h>\n"
+        "#include <netinet/in.h>\n#include <fcntl.h>\n#include <unistd.h>\n",
+        "#include <fcntl.h>\n#include <netinet/in.h>\n#include <sys/socket.h>\n"
+        "#include <sys/types.h>\n#include <sys/un.h>\n#include <unistd.h>\n", 1)
+    s = s.replace(
+        "#include <winsock2.h>\n#include <ws2tcpip.h>\n#endif",
+        "#include <winsock2.h>\n#include <ws2tcpip.h>\n"
+        "#ifdef interface\n"
+        "// windows.h (via winsock2.h) defines an 'interface' macro; undo it so it\n"
+        "// cannot clobber other openMSX code that uses the word as an identifier.\n"
+        "#undef interface\n"
+        "#endif\n#endif", 1)
     s = s.replace(
         "[[nodiscard]] ptrdiff_t sock_send(SOCKET sd, const char* buf, size_t count);\n",
         "[[nodiscard]] ptrdiff_t sock_send(SOCKET sd, const char* buf, size_t count);\n"
@@ -75,6 +85,8 @@ if "sock_makeIPv4" not in s:
         "void sock_setNonBlocking(SOCKET sd);\n"
         "// Set an integer/boolean socket option (wraps the Windows 'const char*' cast).\n"
         "void sock_setIntOption(SOCKET sd, int level, int optName, int value = 1);\n"
+        "// Get an integer socket option (e.g. SO_ERROR), 0 on failure.\n"
+        "[[nodiscard]] int sock_getIntOption(SOCKET sd, int level, int optName);\n"
         "// Non-blocking readiness poll (zero timeout): data ready or pending connection.\n"
         "[[nodiscard]] bool sock_readable(SOCKET sd);\n"
         "// Build an IPv4 sockaddr_in (network order); hostIp==0 -> INADDR_ANY.\n"
@@ -91,6 +103,10 @@ if "sock_makeIPv4" not in s:
         "#else\n\tint flags = fcntl(sd, F_GETFL, 0);\n\tfcntl(sd, F_SETFL, flags | O_NONBLOCK);\n#endif\n}\n\n"
         "void sock_setIntOption(SOCKET sd, int level, int optName, int value)\n{\n"
         "\tsetsockopt(sd, level, optName, std::bit_cast<const char*>(&value), sizeof(value));\n}\n\n"
+        "int sock_getIntOption(SOCKET sd, int level, int optName)\n{\n"
+        "\tint value = 0;\n\t::socklen_t len = sizeof(value);\n"
+        "\tif (getsockopt(sd, level, optName, std::bit_cast<char*>(&value), &len) != 0) {\n"
+        "\t\treturn 0;\n\t}\n\treturn value;\n}\n\n"
         "bool sock_readable(SOCKET sd)\n{\n"
         "\tfd_set rfds;\n\tFD_ZERO(&rfds);\n\tFD_SET(sd, &rfds);\n\ttimeval tv = {0, 0};\n"
         "\treturn select(static_cast<int>(sd) + 1, &rfds, nullptr, nullptr, &tv) > 0;\n}\n\n"
@@ -106,6 +122,25 @@ if "sock_makeIPv4" not in s:
         "\t\t\tip = ntohl(local.sin_addr.s_addr);\n\t\t}\n\t}\n\tsock_close(sd);\n\treturn ip;\n}\n")
     s = s.replace("\n} // namespace openmsx\n", funcs + "\n} // namespace openmsx\n", 1)
     cc.write_text(s)
+PY
+
+# Add converting constructors to the unaligned Endian::UA_* types (used by
+# the UnapiNet wire structs' designated initializers). Idempotent.
+python3 - <<'PY'
+import pathlib
+p = pathlib.Path("src/utils/endian.hh")
+s = p.read_text()
+if "explicit UA_B32" not in s:
+    for name, ty, fn in [("UA_B16","uint16_t","write_UA_B16"), ("UA_L16","uint16_t","write_UA_L16"),
+                         ("UA_L24","uint32_t","write_UA_L24"), ("UA_B32","uint32_t","write_UA_B32"),
+                         ("UA_L32","uint32_t","write_UA_L32")]:
+        old = "class %s {\npublic:\n\t[[nodiscard]] operator %s() const" % (name, ty)
+        new = ("class %s {\npublic:\n\t%s() = default; // leave uninitialized\n"
+               "\texplicit %s(%s a) { %s(x.data(), a); }\n"
+               "\t[[nodiscard]] operator %s() const") % (name, name, name, ty, fn, ty)
+        assert old in s, name
+        s = s.replace(old, new, 1)
+    p.write_text(s)
 PY
 
 # All platforms: gate -ldl to Linux only. The stock build adds -ldl on every
