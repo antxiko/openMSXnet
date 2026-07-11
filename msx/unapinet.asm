@@ -75,6 +75,7 @@ ERR_QUERY_EXISTS: equ   5
 ERR_NO_FREE_CONN: equ   9
 ERR_NO_CONN:    equ     11
 ERR_CONN_STATE: equ     12
+ERR_BUFFER:     equ     13      ; insufficient output buffer space
 
 
 ;***************************
@@ -1041,13 +1042,21 @@ FN_TCP_SEND:
         in      a,(IO_CMD)
         cp      STATUS_DATA
         jr      nz,.ts_serr
-        in      a,(IO_DATA)     ; 0=ok, 1=error
+        in      a,(IO_DATA)     ; 0=ok, 1=error, 2=send buffer full
         or      a
-        ei                      ; [FIX 2026-06-08] reponer IE ANTES de ambos returns:
-                                ; el 'ret z' del path OK salia SIN ei (fuga de IE que,
-                                ; con el di global de UNAPI_ENTRY, colgaria la maquina).
-        ret     z               ; A=0 = ERR_OK
+        jr      z,.ts_ok
+        cp      2
+        jr      z,.ts_full
         ld      a,ERR_CONN_STATE
+        ei                      ; [FIX 2026-06-08] IE ANTES de cada ret: con el di
+        ret                     ; global de UNAPI_ENTRY, un ret sin ei cuelga la maquina.
+.ts_ok:
+        xor     a               ; ERR_OK
+        ei
+        ret
+.ts_full:                       ; buffer de envio lleno: transitorio, se puede reintentar
+        ld      a,ERR_BUFFER
+        ei
         ret
 .ts_serr:
         ld      a,ERR_CONN_STATE
