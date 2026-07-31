@@ -32,6 +32,10 @@ mkdir -p src/unapinet share/extensions
 cp "${ROOT}/unapinet/UnapiNet.hh" "${ROOT}/unapinet/UnapiNet.cc" \
    "${ROOT}/unapinet/UnapiNetWire.hh" src/unapinet/
 cp "${ROOT}/unapinet/unapinet.xml" share/extensions/
+# Extension config used by the documented run command (-ext Nextor213_IDE).
+# The ROM (sha1-checked) and the HD image are supplied by the user; see
+# docs/USAGE.md.
+cp "${ROOT}/unapinet/Nextor213_IDE.xml" share/extensions/
 
 # Register the device class in DeviceFactory.cc (idempotent).
 if ! grep -q '"UnapiNet"' src/DeviceFactory.cc; then

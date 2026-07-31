@@ -1,0 +1,30 @@
+<?xml version="1.0" ?>
+<!DOCTYPE msxconfig SYSTEM 'msxconfig2.dtd'>
+<msxconfig>
+  <info>
+    <name>Nextor 2.1.3 IDE</name>
+    <manufacturer>Konamiman</manufacturer>
+    <code/>
+    <release_year>2025</release_year>
+    <description>Sunrise ATA-IDE with Nextor 2.1.3</description>
+    <type>external hard disk</type>
+  </info>
+  <devices>
+    <primary slot="any">
+      <secondary slot="any">
+        <SunriseIDE id="Nextor IDE">
+          <mem base="0x0000" size="0x10000"/>
+          <rom>
+            <sha1>f7c1ba07590dd12e107b76decf48c957ef95c54d</sha1>
+            <filename>Nextor-2.1.3.SunriseIDE.ROM</filename>
+          </rom>
+          <master>
+            <type>IDEHD</type>
+            <filename>nextor_hd.dsk</filename>
+            <size>100</size>
+          </master>
+        </SunriseIDE>
+      </secondary>
+    </primary>
+  </devices>
+</msxconfig>
