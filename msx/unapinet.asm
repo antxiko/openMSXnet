@@ -28,8 +28,8 @@ ARG:    equ     0F847h
 ; --- API / Implementation version
 API_V_P:        equ     1
 API_V_S:        equ     1
-ROM_V_P:        equ     1
-ROM_V_S:        equ     1
+ROM_V_P:        equ     2
+ROM_V_S:        equ     0
 
 ; --- Max function number
 MAX_FN:         equ     18
@@ -39,8 +39,9 @@ MAX_IMPFN:      equ     0
 IO_CMD:         equ     28h     ; W=command, R=status
 IO_DATA:        equ     29h     ; W=param,   R=result
 
-; --- Bridge commands
-CMD_PING:       equ     00h
+; --- Bridge commands (protocol v2: every reply begins with a status byte
+;     carrying the UNAPI error code verbatim; 0 = success)
+CMD_DETECT:     equ     00h
 CMD_DNS_QUERY:  equ     01h
 CMD_DNS_STATUS: equ     02h
 CMD_TCP_OPEN:   equ     03h
@@ -59,11 +60,9 @@ CMD_UDP_RECV:   equ     0Fh
 CMD_ICMP_SEND:  equ     11h
 CMD_ICMP_RECV:  equ     12h
 
-; --- Bridge status
-STATUS_OK:      equ     00h
-STATUS_ERROR:   equ     01h
-STATUS_DATA:    equ     02h
-PING_MAGIC:     equ     0ABh
+; --- DETECT acceptance triplet (reply bytes 0-2 must be exactly 00 55 02)
+DETECT_MAGIC:   equ     55h
+DETECT_VER:     equ     2
 
 ; --- UNAPI error codes
 ERR_OK:         equ     0
@@ -85,14 +84,25 @@ ERR_BUFFER:     equ     13      ; insufficient output buffer space
         org     100h
 
         ;--- Detect openMSX extension first
+        ; DETECT is issued twice unconditionally and only the second reply
+        ; is read: the first either succeeds and is abandoned by the next
+        ; opcode write, or clears a stray parameter block a crashed
+        ; predecessor left buffered. Accept iff bytes 0-2 are 00 55 02;
+        ; the caps byte and the reserved byte are data, not acceptance,
+        ; and stay unread (the next write discards them).
 
-        ld      a,CMD_PING
+        ld      a,CMD_DETECT
         out     (IO_CMD),a
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
+        ld      a,CMD_DETECT
+        out     (IO_CMD),a
+        in      a,(IO_DATA)     ; status: 00, or FFh with no device at all
+        or      a
         jr      nz,NO_EXT
-        in      a,(IO_DATA)
-        cp      PING_MAGIC
+        in      a,(IO_DATA)     ; magic
+        cp      DETECT_MAGIC
+        jr      nz,NO_EXT
+        in      a,(IO_DATA)     ; protocol version
+        cp      DETECT_VER
         jr      z,EXT_OK
 
 NO_EXT:
@@ -386,7 +396,7 @@ _PUT_P1:
 ;--- Strings
 
 WELCOME_S:
-        db      "UNAPINET v1.1 - UNAPI TCP/IP bridge for openMSX",13,10
+        db      "UNAPINET v2.0 - UNAPI TCP/IP bridge for openMSX",13,10
         db      "(c) 2026 openMSXnet project",13,10
         db      13,10,"$"
 
@@ -612,8 +622,28 @@ FN_GET_CAPAB:
         ; bit0=PING, bit2=DNS, bit3=TCP active,
         ; bit4=TCP passive (specified remote), bit5=TCP passive (unspec remote),
         ; bit10=UDP
+        ; PING is only advertised when the bridge can actually ping: DETECT
+        ; reply byte 3 bit4 (ICMP), latched by the device at start. DETECT
+        ; twice, read only the second reply (stream-resync recipe).
+        ld      a,CMD_DETECT
+        out     (IO_CMD),a
+        ld      a,CMD_DETECT
+        out     (IO_CMD),a
+        in      a,(IO_DATA)     ; status
+        or      a
+        jr      nz,.cap1_nopng
+        in      a,(IO_DATA)     ; magic (discard: we are installed)
+        in      a,(IO_DATA)     ; version (discard)
+        in      a,(IO_DATA)     ; capability byte
+        and     10h             ; bit4 = ICMP
+        jr      z,.cap1_nopng
         ld      hl,043Dh        ; 0x0400 | 0x0030 | 0x000C | 0x0001
         ld      de,043Dh
+        jr      .cap1_done
+.cap1_nopng:
+        ld      hl,043Ch        ; same set minus bit0 (PING)
+        ld      de,043Ch
+.cap1_done:
         ld      b,0             ; link level: unknown
         xor     a
         ei
@@ -671,8 +701,8 @@ FN_GET_IPINFO:
 .ip_local:
         ld      a,CMD_GET_LOCALIP
         out     (IO_CMD),a
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
+        in      a,(IO_DATA)     ; status (GET_LOCALIP cannot fail)
+        or      a
         jr      nz,.ip_zero
         in      a,(IO_DATA)
         ld      l,a             ; octet 1
@@ -699,8 +729,8 @@ FN_GET_IPINFO:
         ; Same as local but .1
         ld      a,CMD_GET_LOCALIP
         out     (IO_CMD),a
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
+        in      a,(IO_DATA)     ; status
+        or      a
         jr      nz,.ip_zero
         in      a,(IO_DATA)
         ld      l,a
@@ -746,10 +776,10 @@ FN_GET_IPINFO:
 FN_NET_STATE:
         ld      a,CMD_NET_STATE
         out     (IO_CMD),a
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
+        in      a,(IO_DATA)     ; status
+        or      a
         jr      nz,.ns_open
-        in      a,(IO_DATA)
+        in      a,(IO_DATA)     ; network state byte
         ld      b,a
         xor     a
         ei
@@ -766,12 +796,14 @@ FN_NET_STATE:
 ;    Output: A=err, B=status, L.H.E.D=IP if resolved
 
 FN_DNS_Q:
-        ; Write hostname bytes to data port
+        ; Write the hostname to the data port. v2: the parameter block IS
+        ; the hostname - the caller's NUL terminates the copy but is NOT
+        ; sent to the bridge.
         push    hl
 .dq_lp: ld      a,(hl)
-        out     (IO_DATA),a
         or      a
         jr      z,.dq_done
+        out     (IO_DATA),a
         inc     hl
         jr      .dq_lp
 .dq_done:
@@ -781,18 +813,15 @@ FN_DNS_Q:
         ld      a,CMD_DNS_QUERY
         out     (IO_CMD),a
 
-        ; Read result
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
+        in      a,(IO_DATA)     ; status: 0, or 4/5 verbatim for the caller
+        or      a
         jr      nz,.dq_err
 
-        in      a,(IO_DATA)     ; status byte
+        in      a,(IO_DATA)     ; 0 = lookup started, 1 = resolved now
         ld      b,a
-        cp      1
-        jr      z,.dq_ip
-        cp      2
-        jr      z,.dq_ip
-        ; status 0 = in progress
+        or      a
+        jr      nz,.dq_ip
+        ; lookup started (poll TCPIP_DNS_S)
         xor     a
         ei
         ret
@@ -811,8 +840,7 @@ FN_DNS_Q:
         ret
 
 .dq_err:
-        ld      a,ERR_QUERY_EXISTS
-        ei
+        ei                      ; A = UNAPI error code, straight off the wire
         ret
 
 
@@ -824,11 +852,11 @@ FN_DNS_S:
         ld      a,CMD_DNS_STATUS
         out     (IO_CMD),a
 
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
-        jr      nz,.ds_idle
+        in      a,(IO_DATA)     ; command status (DNS_STATUS itself cannot fail)
+        or      a
+        jr      nz,.ds_cmderr
 
-        in      a,(IO_DATA)     ; status
+        in      a,(IO_DATA)     ; lookup state
         cp      2
         jr      z,.ds_complete
         cp      0FFh
@@ -836,10 +864,14 @@ FN_DNS_S:
         cp      1
         jr      z,.ds_progress
         ; idle
-.ds_idle:
         ld      b,0
         xor     a
         ei
+        ret
+
+.ds_cmderr:
+        ld      b,0
+        ei                      ; A = status verbatim (desync / no device)
         ret
 
 .ds_progress:
@@ -865,8 +897,8 @@ FN_DNS_S:
         ret
 
 .ds_error:
-        in      a,(IO_DATA)     ; DNS error code
-        ld      b,a
+        in      a,(IO_DATA)     ; DNS_S sub-error (a success reply carrying
+        ld      b,a             ;  bad news: the lookup failed, not the command)
         ld      a,8             ; ERR_DNS
         ei
         ret
@@ -888,21 +920,18 @@ FN_TCP_OPEN:
         ld      a,CMD_TCP_OPEN
         out     (IO_CMD),a
 
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
+        in      a,(IO_DATA)     ; status: 0, or 2/4/9 verbatim
+        or      a
         jr      nz,.to_err
 
-        in      a,(IO_DATA)     ; handle
-        or      a
-        jr      z,.to_err
+        in      a,(IO_DATA)     ; handle (1-4)
         ld      b,a
         xor     a               ; ERR_OK
         ei
         ret
 
 .to_err:
-        ld      a,ERR_NO_FREE_CONN
-        ei
+        ei                      ; A = UNAPI error code, straight off the wire
         ret
 
 
@@ -916,16 +945,8 @@ FN_TCP_CLOSE:
         ld      a,CMD_TCP_CLOSE
         out     (IO_CMD),a
 
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
-        jr      nz,.tc_err
-        in      a,(IO_DATA)     ; consume status byte
-        xor     a
-        ei
-        ret
-.tc_err:
-        ld      a,ERR_NO_CONN
-        ei
+        in      a,(IO_DATA)     ; the reply IS the status: 0 or 11 verbatim
+        ei                      ; (v1 ignored this byte and always returned OK)
         ret
 
 
@@ -934,20 +955,14 @@ FN_TCP_CLOSE:
 ;    Output: A=err
 
 FN_TCP_ABORT:
+        ; B=0 aborts every transient connection (v2 honors the UNAPI 0-form;
+        ; v1 silently no-opped it because this byte was never read).
         ld      a,b
         out     (IO_DATA),a
         ld      a,CMD_TCP_ABORT
         out     (IO_CMD),a
 
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
-        jr      nz,.ta_err
-        in      a,(IO_DATA)     ; consume status byte
-        xor     a
-        ei
-        ret
-.ta_err:
-        ld      a,ERR_NO_CONN
+        in      a,(IO_DATA)     ; the reply IS the status: 0 or 11 verbatim
         ei
         ret
 
@@ -962,11 +977,11 @@ FN_TCP_STATE:
         ld      a,CMD_TCP_STATE
         out     (IO_CMD),a
 
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
+        in      a,(IO_DATA)     ; status: 0, or 11 verbatim (out-of-range handle)
+        or      a
         jr      nz,.ts_err
 
-        ; Read 12-byte response from bridge:
+        ; Read the 12 bytes that follow the status:
         ;   state, avail[2], close_reason,
         ;   remote_ip[4], remote_port[2], local_port[2]
         ; Per UNAPI spec, we return:
@@ -1003,8 +1018,7 @@ FN_TCP_STATE:
         ld      hl,0
         ld      de,0
         ld      ix,0
-        ld      a,ERR_NO_CONN
-        ei
+        ei                      ; A = UNAPI error code, straight off the wire
         ret
 
 
@@ -1039,29 +1053,12 @@ FN_TCP_SEND:
         ld      a,CMD_TCP_SEND
         out     (IO_CMD),a
 
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
-        jr      nz,.ts_serr
-        in      a,(IO_DATA)     ; 0=ok, 1=error, 2=send buffer full
-        or      a
-        jr      z,.ts_ok
-        cp      2
-        jr      z,.ts_full
-        ld      a,ERR_CONN_STATE
+        ; The reply IS the status: 0, or 4/11/12/13 verbatim. ERR_BUFFER (13)
+        ; is all-or-nothing on the bridge side: nothing was queued, the same
+        ; send may be retried later.
+        in      a,(IO_DATA)
         ei                      ; [FIX 2026-06-08] IE ANTES de cada ret: con el di
         ret                     ; global de UNAPI_ENTRY, un ret sin ei cuelga la maquina.
-.ts_ok:
-        xor     a               ; ERR_OK
-        ei
-        ret
-.ts_full:                       ; buffer de envio lleno: transitorio, se puede reintentar
-        ld      a,ERR_BUFFER
-        ei
-        ret
-.ts_serr:
-        ld      a,ERR_CONN_STATE
-        ei
-        ret
 
 
 ;--- Function 18: TCPIP_TCP_RCV
@@ -1083,9 +1080,9 @@ FN_TCP_RCV:
         ld      a,CMD_TCP_RECV
         out     (IO_CMD),a
 
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
-        jr      nz,.tr_nodata
+        in      a,(IO_DATA)     ; status: 0, or 4/11 verbatim (length 0 with a
+        or      a               ;  live idle connection is a SUCCESS, not an error)
+        jr      nz,.tr_err
 
         ; Read actual length (2 bytes LE)
         in      a,(IO_DATA)
@@ -1114,12 +1111,11 @@ FN_TCP_RCV:
         ei
         ret
 
-.tr_nodata:
+.tr_err:
         pop     de
         ld      bc,0
         ld      hl,0
-        ld      a,ERR_NO_DATA
-        ei
+        ei                      ; A = UNAPI error code, straight off the wire
         ret
 
 
@@ -1138,17 +1134,10 @@ FN_SEND_ECHO:
         ld      a,CMD_ICMP_SEND
         out     (IO_CMD),a
 
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
-        jr      nz,.se_err
-        in      a,(IO_DATA)     ; status byte from bridge
-        or      a
-        jr      nz,.se_err
-        xor     a               ; ERR_OK
-        ei
-        ret
-.se_err:
-        ld      a,ERR_NO_NETWORK
+        ; The reply IS the status: 0, or 1/4 verbatim - on a host without
+        ; working ICMP the bridge now says ERR_NOT_IMP instead of accepting
+        ; a ping that can never answer.
+        in      a,(IO_DATA)
         ei
         ret
 
@@ -1162,13 +1151,9 @@ FN_RCV_ECHO:
         ld      a,CMD_ICMP_RECV
         out     (IO_CMD),a
 
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
-        jr      nz,.re_err
-
-        in      a,(IO_DATA)     ; has_data flag (0=none, 1=yes)
+        in      a,(IO_DATA)     ; status: 0, or 1/3/4 verbatim
         or      a
-        jr      z,.re_err
+        jr      nz,.re_err
 
         pop     hl              ; buffer ptr
         ; Read 11 bytes: IP[4]+TTL[1]+ID[2]+SEQ[2]+len[2]
@@ -1183,8 +1168,7 @@ FN_RCV_ECHO:
         ret
 .re_err:
         pop     hl
-        ld      a,ERR_NO_DATA
-        ei
+        ei                      ; A = UNAPI error code, straight off the wire
         ret
 
 
@@ -1200,19 +1184,16 @@ FN_UDP_OPEN:
         ld      a,CMD_UDP_OPEN
         out     (IO_CMD),a
 
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
-        jr      nz,.uo_err
-        in      a,(IO_DATA)     ; handle
+        in      a,(IO_DATA)     ; status: 0, or 2/4/9 verbatim
         or      a
-        jr      z,.uo_err
+        jr      nz,.uo_err
+        in      a,(IO_DATA)     ; handle (1-4)
         ld      b,a
         xor     a
         ei
         ret
 .uo_err:
-        ld      a,ERR_NO_FREE_CONN
-        ei
+        ei                      ; A = UNAPI error code, straight off the wire
         ret
 
 
@@ -1225,15 +1206,7 @@ FN_UDP_CLOSE:
         out     (IO_DATA),a
         ld      a,CMD_UDP_CLOSE
         out     (IO_CMD),a
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
-        jr      nz,.uc_err
-        in      a,(IO_DATA)
-        xor     a
-        ei
-        ret
-.uc_err:
-        ld      a,ERR_NO_CONN
+        in      a,(IO_DATA)     ; the reply IS the status: 0 or 11 verbatim
         ei
         ret
 
@@ -1247,8 +1220,8 @@ FN_UDP_STATE:
         out     (IO_DATA),a
         ld      a,CMD_UDP_STATE
         out     (IO_CMD),a
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
+        in      a,(IO_DATA)     ; status: 0, or 11 verbatim
+        or      a
         jr      nz,.ustate_err
         in      a,(IO_DATA)     ; size low
         ld      l,a
@@ -1259,8 +1232,7 @@ FN_UDP_STATE:
         ret
 .ustate_err:
         ld      hl,0
-        ld      a,ERR_NO_CONN
-        ei
+        ei                      ; A = UNAPI error code, straight off the wire
         ret
 
 
@@ -1341,17 +1313,9 @@ FN_UDP_SEND:
 .usend_exec:
         ld      a,CMD_UDP_SEND
         out     (IO_CMD),a
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
-        jr      nz,.usend_err
+        ; The reply IS the status: 0, or 2/4/11 verbatim (an oversized or
+        ; refused datagram is 2, and the socket stays open and usable).
         in      a,(IO_DATA)
-        or      a
-        jr      nz,.usend_err
-        xor     a
-        ei
-        ret
-.usend_err:
-        ld      a,ERR_CONN_STATE
         ei
         ret
 
@@ -1371,9 +1335,9 @@ FN_UDP_RCV:
         ld      a,CMD_UDP_RECV
         out     (IO_CMD),a
 
-        in      a,(IO_CMD)
-        cp      STATUS_DATA
-        jr      nz,.ur_none
+        in      a,(IO_DATA)     ; status: 0, or 3/4/11 verbatim
+        or      a
+        jr      nz,.ur_err
 
         ; Read srcIP[4] and save to vars
         in      a,(IO_DATA)
@@ -1432,12 +1396,11 @@ FN_UDP_RCV:
         ei
         ret
 
-.ur_none:
+.ur_err:
         ld      bc,0
         ld      hl,0
         ld      de,0
-        ld      a,ERR_NO_DATA
-        ei
+        ei                      ; A = UNAPI error code, straight off the wire
         ret
 
 
