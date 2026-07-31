@@ -22,8 +22,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Pinned assembler version; single source of truth shared with the
+          # local forja gate (.forja/checks/reassemble.py).
+          $tag = (Get-Content ci/nestor80.version -TotalCount 1).Trim()
+          Write-Host "Pinned Nestor80: $tag"
           New-Item -ItemType Directory -Force tools | Out-Null
-          gh release download --repo Konamiman/Nestor80 `
+          gh release download $tag --repo Konamiman/Nestor80 `
             --pattern 'N80_*_SelfContained_win-x64.zip' `
             --dir tools --skip-existing
           $zip = Get-ChildItem tools -Filter 'N80_*_SelfContained_win-x64.zip' | Select-Object -First 1
