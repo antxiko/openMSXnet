@@ -12,6 +12,12 @@
       "command": "python .forja/checks/ie_invariant.py",
       "required": true,
       "is_test": true
+    },
+    {
+      "name": "wire-sync",
+      "command": "python .forja/checks/wire_sync.py",
+      "required": true,
+      "is_test": true
     }
   ]
 }
