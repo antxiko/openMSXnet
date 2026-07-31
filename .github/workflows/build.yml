@@ -13,9 +13,11 @@ permissions:
 jobs:
   msx-tsr:
     name: MSX TSR (UNAPINET.COM)
-    runs-on: windows-latest
+    # Runner images pinned by version everywhere (not '-latest'): a floating
+    # toolchain already broke this workflow once (see the windows job note).
+    runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Download Nestor80 (self-contained win-x64)
         shell: pwsh
@@ -49,7 +51,7 @@ jobs:
           if (-not (Test-Path msx/unapinet.com)) { throw "Assembly produced no output" }
           Get-Item msx/unapinet.com | Format-List Name, Length, LastWriteTime
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: UNAPINET.COM
           path: msx/unapinet.com
@@ -57,9 +59,9 @@ jobs:
 
   linux:
     name: openMSX Linux (x86_64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install build dependencies
         run: |
@@ -119,7 +121,7 @@ jobs:
           cp -r openMSX/share out/openmsx-linux/share
           cp README.md out/openmsx-linux/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: openmsx-linux-x86_64
           path: out/openmsx-linux/
@@ -127,9 +129,9 @@ jobs:
 
   macos:
     name: openMSX macOS (Apple Silicon)
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install build dependencies
         run: |
@@ -182,7 +184,7 @@ jobs:
           cp -r openMSX/share out/openmsx-macos/share
           cp README.md out/openmsx-macos/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: openmsx-macos-arm64
           path: out/openmsx-macos/
@@ -196,7 +198,7 @@ jobs:
     # staticbindist downloads, which broke the MSYS2-based attempts.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install cross-compile prerequisites
         run: |
@@ -258,7 +260,7 @@ jobs:
             x86_64-w64-mingw32-objdump -p "$BIN" | awk '/DLL Name:/ {print "  ", $3}' | sort -u
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: openmsx-windows-x86_64
           path: out/openmsx-windows/
@@ -268,13 +270,13 @@ jobs:
     name: Publish GitHub release
     needs: [msx-tsr, linux, macos, windows]
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
 
