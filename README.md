@@ -103,6 +103,34 @@ Verified against:
   ([unapinet/protocol-v2.md](unapinet/protocol-v2.md)). TCP/UDP/DNS are
   unaffected.
 
+### Security model
+
+UnapiNet has no access control of its own: it is a bridge, and it trusts
+everything on the MSX side. Any program running in the emulated MSX —
+any `.COM` file executed under Nextor — gets real network access through
+the host's stack, with the privileges of the user who launched
+`openmsx`: outbound TCP, UDP and DNS to loopback, the local network and
+the internet (plus ICMP echo on Windows), and inbound connections via
+TCP passive mode. That includes host services that only listen on
+`127.0.0.1` and are normally unreachable from other machines — to the
+bridge they are ordinary destinations.
+
+On the host side the sockets are deliberately open: passive (listening)
+TCP sockets bind to `0.0.0.0` (all interfaces) with `SO_REUSEADDR`, and
+UDP sockets also bind to `0.0.0.0` with `SO_BROADCAST` enabled for LAN
+discovery. There is no option to restrict the bridge to the loopback
+interface. The only quantitative limits are the connection tables
+(4 TCP + 4 UDP sockets); the only effective access control is the host
+OS firewall.
+
+In practice: running downloaded MSX software with the extension loaded
+is equivalent to granting full network access to unaudited code. Do not
+run `.COM` files of dubious origin while the extension is loaded, keep
+the firewall rules for `openmsx` as tight as your use case allows (see
+[docs/USAGE.md](docs/USAGE.md)), and simply omit `-ext unapinet` from
+the command line when a session does not need networking. An option to
+restrict the bridge to loopback-only operation is a planned improvement.
+
 ## Repository layout
 
 ```

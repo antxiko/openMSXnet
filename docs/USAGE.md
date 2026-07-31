@@ -216,6 +216,18 @@ need no special privileges or capabilities. ICMP echo (`PING`) is
 API); there is no Linux implementation, so `PING` gets no replies while
 TCP/UDP/DNS work normally.
 
+**Security note.** The bridge has no access control of its own: any
+program running inside the emulated MSX gets real network access with
+the privileges of the `openmsx` process — outbound TCP/UDP/DNS to
+loopback, the LAN and the internet, and inbound via TCP passive mode,
+including host services that only listen on `127.0.0.1`. Listening and
+UDP sockets bind to `0.0.0.0` (all interfaces) and there is currently
+no option to restrict the bridge to loopback, so the host firewall is
+the only effective control. Do not run MSX software of dubious origin
+with the extension loaded, and omit `-ext unapinet` when a session does
+not need networking. See the "Security model" section in
+[README.md](../README.md) for the full picture.
+
 ---
 
 ## 5. Installing on macOS
