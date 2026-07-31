@@ -372,8 +372,8 @@ The device writes no log file. When an MSX program misbehaves:
 
 ## 9. License
 
-The openMSXnet sources are MIT-licensed (see [LICENSE](../LICENSE) when
-present, otherwise the header in `unapinet/UnapiNet.cc`). openMSX itself
+The openMSXnet sources are MIT-licensed (see [LICENSE](../LICENSE)).
+openMSX itself
 is GPL-2.0; the binary you download is therefore GPL-2.0. Source for
 the exact build commit is available from the *Actions* run that produced
 it.

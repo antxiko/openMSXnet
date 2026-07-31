@@ -423,4 +423,4 @@ concurrently calling into the same socket.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
