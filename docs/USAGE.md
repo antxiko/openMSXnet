@@ -19,8 +19,8 @@ MSX TSR:
 | Asset                          | Contents                                                                                  |
 |--------------------------------|-------------------------------------------------------------------------------------------|
 | `openmsx-windows-x86_64.zip`   | Single self-contained `openmsx.exe` (statically linked, no DLLs) + `share/`.              |
-| `openmsx-linux-x86_64.zip`     | `openmsx` ELF binary + `share/`. Install matching SDL2/Tcl/etc. via your package manager. |
-| `openmsx-macos-arm64.zip`      | `openmsx` Mach-O binary + `share/`. Install dependencies via Homebrew.                    |
+| `openmsx-linux-x86_64.zip`     | `openmsx` ELF binary + the complete `share/` tree (machines, extensions, scripts); point `OPENMSX_SYSTEM_DATA` at it. Install matching SDL2/Tcl/etc. via your package manager. |
+| `openmsx-macos-arm64.zip`      | `openmsx` Mach-O binary + the complete `share/` tree (machines, extensions, scripts); point `OPENMSX_SYSTEM_DATA` at it. Install dependencies via Homebrew. |
 | `UNAPINET.COM`                 | The Z80 TSR (~2 KiB) that you copy onto the MSX disk image.                               |
 
 Download from the **Releases** page:
@@ -210,11 +210,11 @@ mdir   -i ~/msx/nextor_hd.dsk@@512 ::UNAPINET.COM
 
 ### 4.6 Capabilities and ports
 
-The bridge uses the host's BSD socket API directly. No `CAP_NET_RAW` is
-required for ICMP echo on Linux when the kernel allows unprivileged ICMP
-sockets (the default on most modern distributions, controlled by
-`/proc/sys/net/ipv4/ping_group_range`). If your distribution disables it,
-ping support will return errors but TCP/UDP/DNS will still work.
+The bridge uses the host's BSD socket API directly, so TCP, UDP and DNS
+need no special privileges or capabilities. ICMP echo (`PING`) is
+**Windows-only** in the current version (it uses the `IcmpSendEcho`
+API); there is no Linux implementation, so `PING` gets no replies while
+TCP/UDP/DNS work normally.
 
 ---
 
@@ -319,8 +319,10 @@ A:\>HGET http://example.com/index.html
 A:\>TELNET sotanomsxbbs.org 23
 ```
 
-If `PING` hangs or SNTP returns errors, see the Troubleshooting section
-below.
+`PING` only works when the host is Windows (ICMP is not implemented on
+Linux/macOS in the current version) — on those platforms use `SNTP` or
+`HGET` as the smoke test. If SNTP returns errors, see the
+Troubleshooting section below.
 
 ---
 
@@ -332,17 +334,25 @@ below.
 | `UNAPINET.COM` errors on installation                       | The disk image was modified by openMSX while the emulator was running and `mcopy` updated a stale snapshot. Close the emulator before copying.    |
 | `No TCP/IP UNAPI implementation found` from `hget`/`telnet` | The TSR was not loaded, or you launched a different DOS than the one where you ran `UNAPINET`. Re-run `UNAPINET` after each cold boot.            |
 | `hget` hangs with the cursor blinking forever               | Old build of the TSR. The current build implements `TCPIP_WAIT` (fn 29). Rebuild and reinstall `UNAPINET.COM`.                                    |
-| `PING` returns "TIMEOUT" but the host is reachable          | (Linux) `/proc/sys/net/ipv4/ping_group_range` excludes your user. Either widen the range (`echo "0 2147483647" | sudo tee ...`) or run as root.   |
+| `PING` never gets replies on Linux/macOS                    | ICMP echo is Windows-only in the current version; there is no Linux/macOS implementation. TCP/UDP/DNS are unaffected.                              |
 | Random crashes or "7 halts" in MSXon multiplayer games      | TSR predates the `FN_TCP_STATE` fix. Reinstall the latest `UNAPINET.COM`.                                                                          |
 | openMSX cannot find Tcl on macOS                            | Homebrew's `tcl-tk` is keg-only. Set `DYLD_LIBRARY_PATH` (see §5.2).                                                                              |
 | Firewall blocks listening sockets                           | Allow inbound for `openmsx` on private networks. Required only for TCP passive mode (servers running inside the MSX).                              |
 
 ### Inspecting the bridge
 
-The C++ device emits a debug log at `unapinet_debug.log` next to the
-working directory when launched with `--ext unapinet` (the file is
-truncated on each startup). Each I/O command and result is logged; this
-is the first place to look when an MSX program misbehaves.
+The device writes no log file. When an MSX program misbehaves:
+
+- Check the host OS firewall first (§3.5 / §5.6): outbound TCP/UDP for
+  `openmsx` must be allowed, and inbound too if you use TCP passive
+  mode.
+- Run the test programs shipped in the repo under `msx/`
+  (`test_unapi.asm`, `test_hget.asm`, `testpasv.asm`). Assembled with
+  Nestor80, they exercise the bridge step by step and report each
+  result.
+- Query the connection from the MSX side: `TCPIP_TCP_STATE` (function
+  16) returns the connection state and the number of bytes available,
+  which distinguishes "no connection" from "connected but no data yet".
 
 ---
 

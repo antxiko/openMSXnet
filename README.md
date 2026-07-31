@@ -71,7 +71,7 @@ UnapiNet device (C++, inside openMSX)
 | TCP send / receive | 64 KiB receive buffer per connection |
 | TCP passive mode (listen) | `bind()` + `listen()` with non-blocking `accept()` in the receiver loop |
 | UDP datagrams | Up to 4 simultaneous, automatic fallback when bind to a privileged port (<1024) is denied |
-| ICMP echo (ping) | Uses Windows `IcmpSendEcho` API; no admin required |
+| ICMP echo (ping) | **Windows only**: uses the `IcmpSendEcho` API, no admin required. Not implemented on Linux/macOS in v1 |
 | `TCPIP_WAIT` (fn 29) | `EI`/`HALT` idiom to release a 50/60 Hz tick |
 | `TCPIP_GET_IPINFO` | Local IP discovered via UDP socket trick to 8.8.8.8 |
 
@@ -80,7 +80,7 @@ Verified against:
 - **`hget`** (HTTP/1.1 chunked transfer, tested with example.com)
 - **`sntp`** (clock synchronisation with `pool.ntp.org`)
 - **`tftp`** (file download from a local TFTP server)
-- **`ping`** (ICMP echo request/reply against 8.8.8.8)
+- **`ping`** (ICMP echo request/reply against 8.8.8.8; Windows host only)
 - **MSXon clients** (multiplayer game clients built with MSXgl's `unapi_tcp` library — `tetris.com`, `lobby.com`, etc.)
 
 ### Not implemented
@@ -96,6 +96,12 @@ Verified against:
 - Save states do not preserve socket state; open connections are lost on
   load.
 - TLS is not supported. Plain HTTP/HTTPS clients work for `http://` only.
+- ICMP echo (ping) is implemented on Windows only (`IcmpSendEcho`). On
+  Linux and macOS the v1 bridge has no ICMP implementation, yet
+  `QUERY_CAP` still advertises the PING capability — a known quirk,
+  corrected in the v2 design
+  ([unapinet/protocol-v2.md](unapinet/protocol-v2.md)). TCP/UDP/DNS are
+  unaffected.
 
 ## Repository layout
 
@@ -103,12 +109,27 @@ Verified against:
 unapinet/
   UnapiNet.hh           C++ device class declaration
   UnapiNet.cc           C++ device implementation
+  UnapiNetWire.hh       Bridge wire-format structs (Endian::UA_* fields, wire_layout concept)
+  UnapiNetWire_test.cc  Host-side unit tests for the wire-format structs
   unapinet.xml          openMSX device descriptor (claims I/O ports 28h-29h, same range as DenYoNet)
+  Nextor213_IDE.xml     Extension descriptor for the Nextor 2.1.3 Sunrise IDE ROM used in the run examples
+  protocol-v2.md        Bridge protocol v2 design (agreed during the upstream PR review)
 
 msx/
   unapinet.asm          Z80 TSR (Nestor80 syntax)
   test_unapi.asm        Direct I/O regression test (does not exercise the dispatcher)
   test_hget.asm         End-to-end test mirroring hget's call sequence
+  testpasv.asm          TCP passive-mode (listen) test
+
+docs/
+  USAGE.md              Install-and-run guide for Windows, Linux and macOS
+  unapinet-protocol.md  Authoritative reference for the v1 bridge protocol
+
+ci/
+  setup-openmsx.sh      Clones openMSX, stages the extension sources, applies the build patches
+  nestor80.version      Pinned Nestor80 assembler version used by CI
+
+.forja/                 Repo-local gate checks run before commits (see .forja/gate.json)
 ```
 
 ## Building
@@ -128,8 +149,8 @@ patches. After it finishes, you run `make` in `openMSX/`.
 
 - An openMSX source tree (cloned by the setup script, currently pinned
   to `RELEASE_21_0`).
-- A C++17-capable compiler. On Windows this means the MSYS2 MINGW64
-  toolchain.
+- A C++20-capable compiler (the wire-format header relies on concepts
+  and `std::span`). On Windows this means the MSYS2 MINGW64 toolchain.
 - [Nestor80](https://github.com/Konamiman/Nestor80) Z80 assembler, for
   building `UNAPINET.COM`.
 - A Nextor 2.1.x ROM at runtime (RAM-helper that the TSR depends on);
@@ -190,17 +211,26 @@ landmines, no extraction edge cases.
 
 For reference (the script handles all of these automatically):
 
+- Stages the sources: copies `unapinet/UnapiNet.{hh,cc}` and
+  `unapinet/UnapiNetWire.hh` into `src/unapinet/`, and both
+  `unapinet/unapinet.xml` and `unapinet/Nextor213_IDE.xml` into
+  `share/extensions/`.
+- `src/DeviceFactory.cc` — register the `UnapiNet` device class.
+- `src/events/Socket.hh` / `Socket.cc` — extract the generic host-socket
+  helpers UnapiNet uses (`sock_setNonBlocking`, `sock_setIntOption`,
+  `sock_getIntOption`, `sock_readable`, `sock_makeIPv4`,
+  `sock_localIPv4`).
+- `src/utils/endian.hh` — add converting constructors to the unaligned
+  `Endian::UA_*` types, used by the wire structs' designated
+  initializers.
 - `build/main.mk` — gate `-ldl` to Linux only (macOS and mingw don't have it).
-- `build/msysutils.py` — Python 3 `print()` + bytes/str decoding.
-- `build/platform-mingw-w64.mk` — replace `-static` with selective
-  `-static-libgcc -static-libstdc++` (full `-static` previously
-  conflicted with the dynamic Tcl path; superseded by staticbindist
-  but kept for legacy `make` builds).
+- `build/msysutils.py` — Python 3 `print()` + bytes/str decoding
+  (mingw only).
 - `build/platform-mingw32.mk` — add `-lws2_32 -liphlpapi` for Winsock 2
   and `IcmpSendEcho`.
-- `src/DeviceFactory.cc` — register the `UnapiNet` device class.
-- Copies `unapinet/UnapiNet.{hh,cc}` into `src/unapinet/` and
-  `unapinet/unapinet.xml` into `share/extensions/`.
+
+`build/platform-mingw-w64.mk` is left untouched: the Windows release is
+built via `staticbindist`, where upstream's `-static` link works as-is.
 
 ### MSX TSR
 
@@ -259,16 +289,21 @@ all bytes from a previous call.
 
 ### Bridge command set
 
+The table below is a summary. The authoritative reference for the v1
+bridge protocol is [docs/unapinet-protocol.md](docs/unapinet-protocol.md);
+the v2 design is documented in
+[unapinet/protocol-v2.md](unapinet/protocol-v2.md).
+
 | Cmd  | Mnemonic       | Parameters (port 29h)                | Result (port 29h)                   |
 |------|----------------|--------------------------------------|-------------------------------------|
 | 00h  | `PING`         | -                                    | 1 byte: ABh                         |
 | 01h  | `DNS_QUERY`    | hostname + 00h                       | 1 byte status [+ 4 bytes IP]        |
-| 02h  | `DNS_STATUS`   | -                                    | 1 byte status [+ 4 bytes IP]        |
-| 03h  | `TCP_OPEN`     | IP[4] + port[2 LE]                   | 1 byte handle (0 = error)           |
+| 02h  | `DNS_STATUS`   | -                                    | 1 byte status [+ IP[4] if complete, + error code[1] if error] |
+| 03h  | `TCP_OPEN`     | IP[4] + rport[2 LE] + lport[2 LE] + timeout[2 LE] + flags[1] | 1 byte handle (0 = error) |
 | 04h  | `TCP_SEND`     | handle + len[2 LE] + data            | 1 byte status                       |
 | 05h  | `TCP_RECV`     | handle + maxlen[2 LE]                | len[2 LE] + data                    |
 | 06h  | `TCP_CLOSE`    | handle                               | 1 byte status                       |
-| 07h  | `TCP_STATE`    | handle                               | state + avail[2 LE] + close_reason  |
+| 07h  | `TCP_STATE`    | handle                               | state + avail[2 LE] + close_reason + rIP[4] + rport[2 LE] + lport[2 LE] |
 | 08h  | `TCP_ABORT`    | handle                               | 1 byte status                       |
 | 09h  | `UDP_OPEN`     | local_port[2 LE]                     | 1 byte handle (0 = error)           |
 | 0Ah  | `UDP_CLOSE`    | handle                               | 1 byte status                       |
@@ -314,9 +349,13 @@ all bytes from a previous call.
 - A `SocketActivator` RAII wrapper drives `WSAStartup` / `WSACleanup` on
   Windows.
 - A background thread (`receiverLoop`) runs continuously while the device
-  is alive. It iterates over all open TCP and UDP sockets, polls them with
-  `select()` on a 10 ms cadence, drains any pending data into per-socket
-  queues, and detects connection state transitions (`SYN_SENT` →
+  is alive. It waits on all open TCP and UDP sockets at once with a single
+  combined `select()` (100 ms timeout, so it periodically re-checks for
+  shutdown and picks up newly opened sockets). A TCP socket is armed for
+  reading only while its receive buffer has room — leaving a full socket
+  unread lets TCP's own window provide flow control — and for writing only
+  while queued send data is pending. The loop drains incoming data into
+  per-socket queues and detects connection state transitions (`SYN_SENT` →
   `ESTABLISHED`, remote half-close → `CLOSE_WAIT`).
 - DNS resolution is offloaded to a detached worker thread so that the
   emulator does not block during `getaddrinfo()`.

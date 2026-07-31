@@ -27,7 +27,6 @@ run.bat
 # OS junk
 Thumbs.db
 .DS_Store
-unapinet_debug.log
 .forja/gate-report/
 
 # Downloaded CI build artifact (self-contained openmsx.exe for testing)
