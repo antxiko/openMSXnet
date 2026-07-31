@@ -27,8 +27,10 @@
 // All UA_* members have alignof==1, so each struct is naturally packed (no
 // interior padding); the static_assert on each size guards that.
 //
-// USAGE (UA_* has operator= only, no int constructor):
-//   result:  TcpStateResult r{}; r.state = ...; r.remoteIp = ...; setResult(r);
+// USAGE:
+//   result:  setResult(TcpStateResult{.state = ..., .remoteIp = ip, ...});
+//            (plain integers convert to the UA_* fields; '{}' value-initialises
+//             every field to zero, so partially-filled records are still defined)
 //   param:   auto p = fromBytes<TcpOpenParams>(paramBuf); uint32_t ip = p.remoteIp;
 
 namespace openmsx {
@@ -51,6 +53,10 @@ template<wire_layout T>
 	return std::span<const uint8_t, sizeof(T)>(
 		reinterpret_cast<const uint8_t*>(&d), sizeof(T));
 }
+// Viewing a temporary would leave the span dangling the moment the full
+// expression ends, so make that a compile error rather than a bug.
+template<wire_layout T>
+[[nodiscard]] std::span<const uint8_t, sizeof(T)> asBytes(const T&&) = delete;
 
 // Copy a wire-layout value to its exact on-wire bytes.
 template<wire_layout T>
