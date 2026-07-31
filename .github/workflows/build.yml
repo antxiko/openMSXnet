@@ -73,6 +73,19 @@ jobs:
       - name: Stage openMSX source tree
         run: bash ci/setup-openmsx.sh
 
+      - name: Build and run the wire golden test
+        # Standalone build of unapinet/UnapiNetWire_test.cc against the
+        # staged tree (catch2 from Contrib, patched endian.hh). Cheap, and
+        # it runs BEFORE the full build so marshalling regressions fail
+        # fast instead of shipping untested (the >64KB truncation bug
+        # taught that lesson).
+        run: |
+          printf '#define CATCH_CONFIG_MAIN\n#include "catch.hpp"\n' > /tmp/catch_main.cc
+          g++ -std=c++23 -Iunapinet -IopenMSX/Contrib/catch2 \
+              -IopenMSX/src/utils -IopenMSX/src \
+              /tmp/catch_main.cc unapinet/UnapiNetWire_test.cc -o /tmp/wire_test
+          /tmp/wire_test
+
       - name: Build openMSX
         working-directory: openMSX
         run: make -j$(nproc) OPENMSX_TARGET_OS=linux
