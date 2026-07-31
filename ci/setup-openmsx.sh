@@ -134,13 +134,17 @@ python3 - <<'PY'
 import pathlib
 p = pathlib.Path("src/utils/endian.hh")
 s = p.read_text()
-if "explicit UA_B32" not in s:
+if "UA_B32(uint32_t a)" not in s:
     for name, ty, fn in [("UA_B16","uint16_t","write_UA_B16"), ("UA_L16","uint16_t","write_UA_L16"),
                          ("UA_L24","uint32_t","write_UA_L24"), ("UA_B32","uint32_t","write_UA_B32"),
                          ("UA_L32","uint32_t","write_UA_L32")]:
         old = "class %s {\npublic:\n\t[[nodiscard]] operator %s() const" % (name, ty)
+        # NOT explicit: the PR's review round made these converting ctors
+        # implicit (upstream dce26d721) and the unapinet sources rely on
+        # that in designated initializers (.ip = ip). 'explicit' here broke
+        # all three platform builds (CI run 30650148950).
         new = ("class %s {\npublic:\n\t%s() = default; // leave uninitialized\n"
-               "\texplicit %s(%s a) { %s(x.data(), a); }\n"
+               "\t%s(%s a) { %s(x.data(), a); }\n"
                "\t[[nodiscard]] operator %s() const") % (name, name, name, ty, fn, ty)
         assert old in s, name
         s = s.replace(old, new, 1)
