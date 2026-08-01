@@ -36,7 +36,7 @@ MAX_FN:         equ     18
 MAX_IMPFN:      equ     0
 
 ; --- I/O ports (must match unapinet.xml)
-IO_CMD:         equ     28h     ; W=command, R=status
+IO_CMD:         equ     28h     ; W=command (write-only port in v2)
 IO_DATA:        equ     29h     ; W=param,   R=result
 
 ; --- Bridge commands (protocol v2: every reply begins with a status byte

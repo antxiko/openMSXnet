@@ -299,7 +299,7 @@ I/O ports.
 
 | Port | Write | Read |
 |------|-------|------|
-| 28h  | Command byte; triggers execution | Status mirror: status byte of the last completed command (FFh after reset) |
+| 28h  | Command byte; triggers execution | — (write-only; a read decodes to the open bus, FFh) |
 | 29h  | Parameter byte; appended to a per-command buffer | Result byte; auto-advances on each read |
 
 The MSX appends parameter bytes to port 29h, then writes a command byte
@@ -328,7 +328,7 @@ alone, so the columns below show the success shape.
 | Cmd  | Mnemonic       | Parameters (port 29h)                | Result (port 29h)                   |
 |------|----------------|--------------------------------------|-------------------------------------|
 | 00h  | `DETECT`       | -                                    | st + 55h + 02h + caps + 00h         |
-| 01h  | `DNS_QUERY`    | hostname (no terminator)             | st + 00h (lookup started) or st + 01h + IP[4] (resolved immediately) |
+| 01h  | `DNS_QUERY`    | hostname (no terminator, max 253 bytes) | st + 00h (lookup started) or st + 01h + IP[4] (resolved immediately) |
 | 02h  | `DNS_STATUS`   | -                                    | st + state [+ IP[4] if complete; + sub-error[1] if failed] |
 | 03h  | `TCP_OPEN`     | IP[4] + rport[2 LE] + lport[2 LE] + timeout[2 LE] + flags[1] | st + handle |
 | 04h  | `TCP_SEND`     | handle + len[2 LE] + data            | st                                  |

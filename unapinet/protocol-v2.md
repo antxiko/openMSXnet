@@ -55,7 +55,7 @@ the device side is what v2 added):
 | 1    | ERR_NOT_IMP     | unknown opcode; the ICMP commands on a host without working ICMP (caps bit4 clear) |
 | 2    | ERR_NO_NETWORK  | the host socket layer refused: socket()/bind()/listen() failure, a synchronous connect() failure, a failed or short sendto() (UDP) |
 | 3    | ERR_NO_DATA     | UDP_RECV / ICMP_RECV with an empty queue         |
-| 4    | ERR_INV_PARAM   | malformed parameter block (rule 3), empty hostname, a TCP_SEND length beyond `MAX_TRANSFER`, an undefined flag bit set, UDP_RECV with maxlen 0 |
+| 4    | ERR_INV_PARAM   | malformed parameter block (rule 3), empty hostname or one longer than 253 bytes, a TCP_SEND length beyond `MAX_TRANSFER`, an undefined flag bit set, UDP_RECV with maxlen 0 |
 | 5    | ERR_QUERY_EXISTS| DNS_QUERY while a lookup is already running      |
 | 9    | ERR_NO_FREE_CONN| TCP_OPEN / UDP_OPEN with all handles in use      |
 | 11   | ERR_NO_CONN     | handle out of range (0 included, save the close-all forms of TCP_CLOSE / UDP_CLOSE / TCP_ABORT); or no open connection on it — except TCP_STATE / TCP_RECV, which answer for any in-range handle (see notes) |
@@ -81,24 +81,25 @@ post-operation use of that code) imply every earlier check passed. In
 the OPEN commands the free-slot check (`{9}`) precedes the host socket
 work (`{2}`).
 
-### The status register becomes a mirror
+### The status register is gone — the command port is write-only
 
 The driver's only use of the v1 status register is "did my command produce
 a result?" — with rule 1 that information is the reply's first byte, so
-the register is redundant as a mechanism. Reading the command port now
-returns the status byte of the **last completed command** (`0xFF` after
-reset, before any command has run). It costs nothing, keeps the port
-readable for debugging, and means register and first reply byte can never
-disagree. Only command completion updates it: parameter writes, result
-reads and the discard of a pending result leave it untouched. The three
-v1 situations that raised `STATUS_ERROR` in the register become ordinary
-single-byte error replies (unknown opcode → 1, empty hostname → 4, DNS
-busy → 5).
+the register is redundant as a mechanism, and v2 removes it entirely
+rather than keeping a mirror nobody needs (Wouter's suggestion). The
+device registers the command port for writes only; reading it decodes to
+the open bus (`0xFF` on a standard MSX), exactly as if no device were
+present. The status byte lives in one place — the reply — so there is
+nothing to poll, nothing that can disagree with it, and nothing extra to
+document. The three v1 situations that raised `STATUS_ERROR` in the
+register become ordinary single-byte error replies (unknown opcode → 1,
+empty hostname → 4, DNS busy → 5).
 
 ## What does not change — and two things that do
 
-Unchanged from v1: ports and decoding (base 0x28: command/status, base+1:
-parameter/result), the synchronous transaction model, parameter
+Unchanged from v1: ports and decoding (base 0x28: command, base+1:
+parameter/result — the command port's read side is gone, see above), the
+synchronous transaction model, parameter
 accumulation, the parameter-buffer cap, opcode numbers (except 0x10,
 retired — below), parameter block layouts, handles (1-based, 1..4, TCP
 and UDP independent), `handle 0 = close all transient` in the CLOSE
@@ -112,8 +113,9 @@ them over from the v1 document:
 
 * v1's transaction model says reading past the end returns `0x00` and
   gates each command on `status register == STATUS_DATA (2)`. In v2,
-  past-end reads return `0xFF` (rule 4) and the register is a mirror; a
-  v1-style `== 2` gate would misread success as "no result".
+  past-end reads return `0xFF` (rule 4) and the register does not exist —
+  the port reads as open bus (`0xFF`), so a v1-style `== 2` gate can
+  never pass.
 * v1's DNS_QUERY takes a NUL-terminated name (terminator effectively
   optional, trailing bytes ignored). v2 drops the terminator entirely:
   the parameter block *is* the hostname. This is the only change at the
@@ -332,14 +334,15 @@ rule 3.
 block is the name; there is no terminator (the block length already
 delimits it — v1's NUL was redundant, as Wouter noted). The
 device applies no syntax or charset rules to the hostname — beyond the
-dotted-quad fast path below, the bytes go to the host resolver as-is;
-the only upper length bound is the parameter-buffer cap. A block that
+dotted-quad fast path below, the bytes go to the host resolver as-is.
+The one bound is length: a block longer than **253 bytes** (the DNS
+presentation-form name limit) is "too long" under rule 3 → `{4}`. A block that
 parses as a strict dotted-quad (`a.b.c.d`, four decimal octets 0-255)
 resolves immediately → `{0, 1, ip4}`, and arms the sticky Complete state
 exactly as an asynchronous success does. Anything else starts the
-resolver thread → `{0, 0}`. An empty hostname (an empty block) answers `{4}`;
-a lookup already running answers `{5}`; both leave the DNS state and any
-running lookup untouched.
+resolver thread → `{0, 0}`. An empty hostname (an empty block) or one
+beyond the length cap answers `{4}`; a lookup already running answers
+`{5}`; all of these leave the DNS state and any running lookup untouched.
 
 `DNS_STATUS` (no parameters) reports the lookup, and its reply is data,
 not a command error — a well-formed DNS_STATUS always succeeds:
@@ -363,8 +366,7 @@ A device reset (power-on, MSX reset) restores the ground state: every
 TCP and UDP connection is closed and freed — resident ones included —
 all receive buffers, send queues, datagram queues and ICMP replies are
 discarded, any pending reply and accumulated parameter bytes are
-dropped, the DNS state returns to idle, and the status register reads
-`0xFF` until the first command completes. The ICMP capability stays as
+dropped, and the DNS state returns to idle. The ICMP capability stays as
 latched at device start; reset does not re-probe it.
 
 ## Migration and failure analysis
@@ -374,10 +376,10 @@ with the new openMSX build. The interesting cases are the mismatches:
 
 * **v1 driver, v2 device.** The driver sends opcode 0x00 (its PING) and
   expects the register to read `STATUS_DATA` (2) and the data port to
-  yield `0xAB`. The v2 device runs DETECT: the register mirror reads 0x00
-  and the data port yields `0x00 0x55 ...`. Both checks fail on the first
-  byte → the driver prints "extension not found" and exits. Nothing
-  misbehaves quietly.
+  yield `0xAB`. On the v2 device the register read hits an unregistered
+  port and returns `0xFF`, and the data port yields `0x00 0x55 ...`. Both
+  checks fail on the first byte → the driver prints "extension not
+  found" and exits. Nothing misbehaves quietly.
 * **v2 driver, v1 device.** DETECT goes out as opcode 0x00, which v1
   treats as PING and answers `0xAB`. The v2 driver requires the first
   byte to be `0x00` — `0xAB` fails immediately. Same clean exit.
@@ -389,10 +391,11 @@ with the new openMSX build. The interesting cases are the mismatches:
 One caveat for completeness: the analysis above covers detection, i.e.
 installation time — the only supported pairing path. A *resident* v1 TSR
 carried into a v2 device by other means (a savestate taken on an old
-openMSX and restored on a new one) is not protected: v1's per-call check
-is `status register == 2`, and the v2 mirror legitimately reads 2 after a
-command failed with `ERR_NO_NETWORK`. Re-running the driver's installer
-is the answer; the spec simply does not promise more.
+openMSX and restored on a new one) is not served, but it fails safe:
+v1's per-call gate is `status register == 2`, and on a v2 device that
+read returns `0xFF` from the unregistered port, so every call reports
+failure instead of half-working. Re-running the driver's installer is
+the answer; the spec simply does not promise more.
 
 ## How the open points resolved
 
