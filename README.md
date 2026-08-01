@@ -70,8 +70,8 @@ UnapiNet device (C++, inside openMSX)
 | TCP active connections | Up to 4 simultaneous, non-blocking `connect()` |
 | TCP send / receive | 64 KiB receive buffer per connection |
 | TCP passive mode (listen) | `bind()` + `listen()` with non-blocking `accept()` in the receiver loop |
-| UDP datagrams | Up to 4 simultaneous, automatic fallback when bind to a privileged port (<1024) is denied |
-| ICMP echo (ping) | **Windows only**: uses the `IcmpSendEcho` API, no admin required. Not implemented on Linux/macOS in v1 |
+| UDP datagrams | Up to 4 simultaneous; falls back to an ephemeral local port when the host refuses to bind the requested one (e.g. Windows' time service owns UDP 123) |
+| ICMP echo (ping) | **Windows only**: uses the `IcmpSendEcho` API, no admin required. Elsewhere the capability is reported as absent |
 | `TCPIP_WAIT` (fn 29) | `EI`/`HALT` idiom to release a 50/60 Hz tick |
 | `TCPIP_GET_IPINFO` | Local IP discovered via UDP socket trick to 8.8.8.8 |
 
@@ -97,11 +97,10 @@ Verified against:
   load.
 - TLS is not supported. Plain HTTP/HTTPS clients work for `http://` only.
 - ICMP echo (ping) is implemented on Windows only (`IcmpSendEcho`). On
-  Linux and macOS the v1 bridge has no ICMP implementation, yet
-  `QUERY_CAP` still advertises the PING capability — a known quirk,
-  corrected in the v2 design
-  ([unapinet/protocol-v2.md](unapinet/protocol-v2.md)). TCP/UDP/DNS are
-  unaffected.
+  Linux and macOS the bridge reports the capability as absent (`DETECT`
+  caps bit 4 clear), the TSR stops advertising PING, and the ICMP
+  commands answer `ERR_NOT_IMP` — v1's quirk of advertising a ping that
+  never worked is gone in v2. TCP/UDP/DNS are unaffected.
 
 ### Security model
 
@@ -141,7 +140,7 @@ unapinet/
   UnapiNetWire_test.cc  Host-side unit tests for the wire-format structs
   unapinet.xml          openMSX device descriptor (claims I/O ports 28h-29h, same range as DenYoNet)
   Nextor213_IDE.xml     Extension descriptor for the Nextor 2.1.3 Sunrise IDE ROM used in the run examples
-  protocol-v2.md        Bridge protocol v2 design (agreed during the upstream PR review)
+  protocol-v2.md        Bridge protocol reference (v2; carries the v1 document as a historical appendix)
 
 msx/
   unapinet.asm          Z80 TSR (Nestor80 syntax)
@@ -151,7 +150,6 @@ msx/
 
 docs/
   USAGE.md              Install-and-run guide for Windows, Linux and macOS
-  unapinet-protocol.md  Authoritative reference for the v1 bridge protocol
 
 ci/
   setup-openmsx.sh      Clones openMSX, stages the extension sources, applies the build patches
@@ -301,55 +299,63 @@ I/O ports.
 
 | Port | Write | Read |
 |------|-------|------|
-| 28h  | Command byte; triggers execution | Status (00=OK, 01=ERR, 02=DATA available) |
+| 28h  | Command byte; triggers execution | Status mirror: status byte of the last completed command (FFh after reset) |
 | 29h  | Parameter byte; appended to a per-command buffer | Result byte; auto-advances on each read |
 
 The MSX appends parameter bytes to port 29h, then writes a command byte
 to port 28h. The device processes the command synchronously (DNS is
 serviced asynchronously through a worker thread but its dispatch is
-non-blocking), populates the result buffer, and signals `DATA available`
-on port 28h. The MSX then reads the result bytes sequentially from port
-29h.
+non-blocking) and populates the result buffer; the MSX then reads the
+result bytes sequentially from port 29h. Every reply begins with a
+status byte — 00h for success, otherwise the UNAPI error code the TSR
+hands to its caller verbatim — and an error reply is exactly that one
+byte. Reading past the end of a reply returns FFh, which is never a
+valid status.
 
-Writing to port 29h while a previous result is still pending discards
-the stale result. This avoids deadlocks if the MSX side fails to drain
-all bytes from a previous call.
+Writing to port 29h — or a new command to port 28h — while a previous
+result is still pending discards the stale result. This avoids
+deadlocks if the MSX side fails to drain all bytes from a previous
+call.
 
 ### Bridge command set
 
-The table below is a summary. The authoritative reference for the v1
-bridge protocol is [docs/unapinet-protocol.md](docs/unapinet-protocol.md);
-the v2 design is documented in
-[unapinet/protocol-v2.md](unapinet/protocol-v2.md).
+The table below is a summary of protocol v2. The authoritative
+reference is [unapinet/protocol-v2.md](unapinet/protocol-v2.md), which
+also carries the v1 document as a historical appendix. `st` is the
+status byte that opens every reply; an error reply is the status byte
+alone, so the columns below show the success shape.
 
 | Cmd  | Mnemonic       | Parameters (port 29h)                | Result (port 29h)                   |
 |------|----------------|--------------------------------------|-------------------------------------|
-| 00h  | `PING`         | -                                    | 1 byte: ABh                         |
-| 01h  | `DNS_QUERY`    | hostname + 00h                       | 1 byte status [+ 4 bytes IP]        |
-| 02h  | `DNS_STATUS`   | -                                    | 1 byte status [+ IP[4] if complete, + error code[1] if error] |
-| 03h  | `TCP_OPEN`     | IP[4] + rport[2 LE] + lport[2 LE] + timeout[2 LE] + flags[1] | 1 byte handle (0 = error) |
-| 04h  | `TCP_SEND`     | handle + len[2 LE] + data            | 1 byte status                       |
-| 05h  | `TCP_RECV`     | handle + maxlen[2 LE]                | len[2 LE] + data                    |
-| 06h  | `TCP_CLOSE`    | handle                               | 1 byte status                       |
-| 07h  | `TCP_STATE`    | handle                               | state + avail[2 LE] + close_reason + rIP[4] + rport[2 LE] + lport[2 LE] |
-| 08h  | `TCP_ABORT`    | handle                               | 1 byte status                       |
-| 09h  | `UDP_OPEN`     | local_port[2 LE]                     | 1 byte handle (0 = error)           |
-| 0Ah  | `UDP_CLOSE`    | handle                               | 1 byte status                       |
-| 0Bh  | `UDP_STATE`    | handle                               | size[2 LE] of next datagram         |
-| 0Ch  | `UDP_SEND`     | handle + dest_IP[4] + port[2 LE] + len[2 LE] + data | 1 byte status        |
-| 0Dh  | `GET_LOCALIP`  | -                                    | 4 bytes IP (network order)          |
-| 0Eh  | `NET_STATE`    | -                                    | 1 byte (2 = open)                   |
-| 0Fh  | `UDP_RECV`     | handle + maxlen[2 LE]                | src_IP[4] + src_port[2 LE] + len[2 LE] + data |
-| 10h  | `QUERY_CAP`    | -                                    | 2 bytes: cap0, cap1                 |
-| 11h  | `ICMP_SEND`    | IP[4] + TTL[1] + ID[2 LE] + SEQ[2 LE] + len[2 LE] | 1 byte status             |
-| 12h  | `ICMP_RECV`    | -                                    | has_data[1] + [IP[4]+TTL[1]+ID[2]+SEQ[2]+len[2]] |
+| 00h  | `DETECT`       | -                                    | st + 55h + 02h + caps + 00h         |
+| 01h  | `DNS_QUERY`    | hostname (no terminator)             | st + 00h (lookup started) or st + 01h + IP[4] (resolved immediately) |
+| 02h  | `DNS_STATUS`   | -                                    | st + state [+ IP[4] if complete; + sub-error[1] if failed] |
+| 03h  | `TCP_OPEN`     | IP[4] + rport[2 LE] + lport[2 LE] + timeout[2 LE] + flags[1] | st + handle |
+| 04h  | `TCP_SEND`     | handle + len[2 LE] + data            | st                                  |
+| 05h  | `TCP_RECV`     | handle + maxlen[2 LE]                | st + len[2 LE] + data               |
+| 06h  | `TCP_CLOSE`    | handle (0 = all transient)           | st                                  |
+| 07h  | `TCP_STATE`    | handle                               | st + state + avail[2 LE] + close_reason + rIP[4] + rport[2 LE] + lport[2 LE] |
+| 08h  | `TCP_ABORT`    | handle (0 = all transient)           | st                                  |
+| 09h  | `UDP_OPEN`     | local_port[2 LE]                     | st + handle                         |
+| 0Ah  | `UDP_CLOSE`    | handle (0 = all)                     | st                                  |
+| 0Bh  | `UDP_STATE`    | handle                               | st + size[2 LE] of next datagram    |
+| 0Ch  | `UDP_SEND`     | handle + dest_IP[4] + port[2 LE] + len[2 LE] + data | st                   |
+| 0Dh  | `GET_LOCALIP`  | -                                    | st + IP[4] (network order)          |
+| 0Eh  | `NET_STATE`    | -                                    | st + 1 byte (2 = open)              |
+| 0Fh  | `UDP_RECV`     | handle + maxlen[2 LE]                | st + src_IP[4] + src_port[2 LE] + len[2 LE] + data |
+| 11h  | `ICMP_SEND`    | IP[4] + TTL[1] + ID[2 LE] + SEQ[2 LE] + len[2 LE] | st                     |
+| 12h  | `ICMP_RECV`    | -                                    | st + IP[4] + TTL[1] + ID[2 LE] + SEQ[2 LE] + len[2 LE] |
+
+Opcode 10h (v1's `QUERY_CAP`) is retired: like any unknown opcode it
+answers `ERR_NOT_IMP` (01h). Its role is absorbed by `DETECT`, whose
+reply carries the protocol version and the capability byte.
 
 ### UNAPI dispatch table
 
 | Fn | UNAPI name        | Backed by             |
 |----|-------------------|-----------------------|
 | 0  | `UNAPI_GET_INFO`  | local                 |
-| 1  | `TCPIP_GET_CAPAB` | local (hardcoded)     |
+| 1  | `TCPIP_GET_CAPAB` | local + `DETECT` caps byte (PING advertised only when the bridge can ping) |
 | 2  | `TCPIP_GET_IPINFO`| `GET_LOCALIP` (idx 1) |
 | 3  | `TCPIP_NET_STATE` | `NET_STATE`           |
 | 4  | `TCPIP_SEND_ECHO` | `ICMP_SEND`           |
@@ -396,6 +402,10 @@ the v2 design is documented in
 
 ### TSR side (Z80)
 
+- The installer probes the device with `DETECT` issued twice, reading
+  only the second reply — the first either succeeds and is abandoned or
+  clears any stray parameter bytes a crashed predecessor left buffered —
+  and accepts the device only if the reply starts exactly `00h 55h 02h`.
 - The TSR follows Konamiman's reference RAM-resident pattern:
   installer at 0100h allocates a system mapper segment via DOS 2 mapper
   routines, copies the resident block to 4000h of that segment, and
@@ -433,13 +443,18 @@ in the application protocol.
 
 ### TCP_CLOSE serialisation
 
-`cmdTcpClose` issues `shutdown(SD_SEND)` and transitions the connection
-to `CLOSE_WAIT`. It does **not** call `closesocket()` or take the
-per-connection mutex while transitioning. Both responsibilities are
-delegated to the receiver loop, which observes `recv() == 0` (peer FIN)
-and tears the socket down. Holding the mutex across both `shutdown()`
-and `closesocket()` deadlocks the emulator if the receiver thread is
-concurrently calling into the same socket.
+`cmdTcpClose` stamps `FinWait1` on the connection, arms the 30 s close
+deadline, and sends the FIN (`shutdown` of the send side) as soon as
+the send queue is empty. It never calls `closesocket()` itself: any
+socket the receiver loop may be watching is handed over and closed at
+the top of the receiver's next pass. The connection's handle is
+invalidated immediately — the MSX can reuse it at once — while the
+descriptor stays open until no `select()` can be in flight on it, so
+its number cannot be recycled under a thread still sitting on it. The
+per-connection mutex is only ever held across non-blocking calls
+(`shutdown()` included — see the threading contract in `UnapiNet.hh`);
+sockets never published to a connection slot, such as failed opens,
+are simply closed on the spot.
 
 ## References
 
