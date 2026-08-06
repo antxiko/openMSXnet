@@ -1321,11 +1321,15 @@ FN_UDP_SEND:
 
 
 ;--- Function 12: TCPIP_UDP_RCV
-;    Input: B=handle, HL=buffer ptr, DE=max size
-;    Output: A=err, L.H.E.D=source IP, IX=source port, BC=received size
+;    Input: B=handle, HL=buffer ptr, DE=max size (0 = consume the head
+;           datagram, copy nothing - the spec's deliberate discard)
+;    Output: A=err, L.H.E.D=source IP, IX=source port, BC=datagram size
+;            as received (per the spec it may exceed the bytes copied)
 
 FN_UDP_RCV:
         ld      (UDP_TMP_DATA),hl   ; save user buffer ptr
+        ld      (UDP_TMP_MAX),de    ; save max size: the wire carries
+                                    ; min(len, maxlen) payload bytes
         ld      a,b
         out     (IO_DATA),a
         ld      a,e
@@ -1359,12 +1363,22 @@ FN_UDP_RCV:
         in      a,(IO_DATA)
         ld      (UDP_TMP_LENH),a
 
-        ; Copy data to user buffer
+        ; Copy data to user buffer. len is the datagram's size as
+        ; received; the wire carries only min(len, maxlen) bytes, so
+        ; that is the copy count (and len itself is BC on return).
+        ld      hl,(UDP_TMP_LENL)    ; len as received
+        ld      de,(UDP_TMP_MAX)
+        or      a
+        sbc     hl,de
+        jr      c,.ur_cnt_len        ; len < maxlen: copy len bytes
+        ld      hl,(UDP_TMP_MAX)     ; len >= maxlen: copy maxlen bytes
+        jr      .ur_cnt_ok
+.ur_cnt_len:
+        ld      hl,(UDP_TMP_LENL)
+.ur_cnt_ok:
+        ld      b,h
+        ld      c,l
         ld      hl,(UDP_TMP_DATA)    ; dest
-        ld      a,(UDP_TMP_LENL)
-        ld      c,a
-        ld      a,(UDP_TMP_LENH)
-        ld      b,a
 .ur_d:  ld      a,b
         or      c
         jr      z,.ur_done
@@ -1450,6 +1464,7 @@ UDP_TMP_LENL:   db      0
 UDP_TMP_LENH:   db      0
 UDP_TMP_DATA:   dw      0
 UDP_TMP_PBLK:   dw      0
+UDP_TMP_MAX:    dw      0
 TCP_INFO_PTR:   dw      0
 
 UNAPI_ID:
